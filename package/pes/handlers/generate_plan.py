@@ -433,7 +433,7 @@ class AIResponsesLLM:
 # ────────────────────────────────────────────────────────────────────────────────    
 @dataclass
 class ActionSpec:
-    name: str
+    key: str
     description: str
     required_args: List[str] = field(default_factory=list)
     optional_args: List[str] = field(default_factory=list)
@@ -453,10 +453,10 @@ def eval_bool(expr: str, context: Dict[str, Any]) -> bool:
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# The v2.1 Agent
+# PlanAgent
 # ────────────────────────────────────────────────────────────────────────────────
 
-class ERAAgentV2_2:
+class PlanAgent:
     """
     v2.2:
       - LLM-crafted signature, plan adaptation/composition, and selection
@@ -472,6 +472,50 @@ class ERAAgentV2_2:
         self.llm = llm
         self.action_catalog = action_catalog
         self.prompts = prompts or {}
+    
+    def _replace_tokens(self, prompt: str, replacements: Dict[str, Any]) -> str:
+        """
+        Replace tokens in prompt template with actual values.
+        Supports #token# format (new) and {token} format (legacy).
+        JSON tokens are automatically wrapped in ```json ... ``` code blocks.
+        
+        Args:
+            prompt: Template string with tokens
+            replacements: Dictionary mapping token names to values
+            
+        Returns:
+            Prompt with all tokens replaced
+        """
+        # Tokens that should be wrapped in JSON code blocks
+        json_tokens = {
+            'sig_text', 'example_cases', 'fact_texts', 'catalog_summary',
+            'catalog', 'skills', 'activities_requested', 'plan_details'
+        }
+        
+        for token, value in replacements.items():
+            # Handle #token# format (new, preferred)
+            token_placeholder = '#' + token + '#'
+            if token_placeholder in prompt:
+                if token in json_tokens:
+                    # Wrap JSON tokens in code blocks
+                    replacement = f'```json\n{value}\n```'
+                else:
+                    # Simple replacement for non-JSON tokens
+                    replacement = str(value)
+                prompt = prompt.replace(token_placeholder, replacement)
+            
+            # Legacy support for {token} and {{token}} formats
+            legacy_placeholder1 = '{' + token + '}'
+            legacy_placeholder2 = '{{' + token + '}}'
+            if legacy_placeholder1 in prompt or legacy_placeholder2 in prompt:
+                if token in json_tokens:
+                    replacement = f'```json\n{value}\n```'
+                else:
+                    replacement = str(value)
+                prompt = prompt.replace(legacy_placeholder1, replacement)
+                prompt = prompt.replace(legacy_placeholder2, replacement)
+        
+        return prompt
 
     # 1) Signature via LLM
     def to_signature(self, req: Dict[str, Any]) -> Signature:
@@ -479,21 +523,31 @@ class ERAAgentV2_2:
         
         # Extract the actual request text
         request_text = req.get("request", "") if isinstance(req.get("request"), str) else json.dumps(req)
+        print(f'[DEBUG] Request text: {request_text}')
         
         # Current time and date
         current_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        print(f'[DEBUG] Current time computed: {current_time}')
         
         # Use prompt from database if available, otherwise use default
         prompt_template = self.prompts.get('to_signature', '')
         if prompt_template:
-            # Replace placeholders in the prompt template (support multiple formats)
-            prompt = prompt_template
-            # Replace common placeholder formats
-            prompt = prompt.replace('{request_text}', request_text)
-            prompt = prompt.replace('{{request_text}}', request_text)
-            prompt = prompt.replace('{current_time}', current_time)
-            prompt = prompt.replace('{{current_time}}', current_time)
+            print(f'[DEBUG] Using prompt from YAML (length: {len(prompt_template)} chars)')
+            # Replace tokens with computed values
+            replacements = {
+                'request_text': request_text,
+                'current_time': current_time
+            }
+            print(f'[DEBUG] Token replacements: {replacements}')
+            prompt = self._replace_tokens(prompt_template, replacements)
+            # Verify token replacement
+            if '#current_time#' in prompt or '{current_time}' in prompt:
+                print(f'[WARNING] Token #current_time# or {{current_time}} still present in prompt after replacement!')
+            if '#request_text#' in prompt or '{request_text}' in prompt:
+                print(f'[WARNING] Token #request_text# or {{request_text}} still present in prompt after replacement!')
+            print(f'[DEBUG] Prompt preview (first 500 chars): {prompt[:500]}...')
         else:
+            print('[WARNING] No prompt template found, using fallback hardcoded prompt')
             # Fallback to default hardcoded prompt (for backward compatibility)
             prompt = f"""
             You are a systems normalizer for an experience-retrieval planning agent specializing in complex tasks.
@@ -706,20 +760,15 @@ class ERAAgentV2_2:
               "dates": {{"date": "estimated_date"}}
             }}
         """
-        # Additional placeholder replacements if needed
-        if prompt_template:
-            # Ensure all placeholders are replaced
-            prompt = prompt.replace('{request_text}', request_text)
-            prompt = prompt.replace('{{request_text}}', request_text)
-            prompt = prompt.replace('{current_time}', current_time)
-            prompt = prompt.replace('{{current_time}}', current_time)
+        # Note: Token replacement is already handled by _replace_tokens() above
+        # This fallback section uses hardcoded prompt with old format for backward compatibility
         data = self.llm.complete_json(prompt)
         
         if not data:
+            print('[ERROR] LLM returned no data for signature')
             return False
         
-        
-        
+        print('[DEBUG] LLM response for signature:', json.dumps(data, indent=2))
         print('Parsed signature:', json.dumps(data, indent=2))
         
         # Filter to only valid Signature fields
@@ -783,29 +832,27 @@ class ERAAgentV2_2:
         fact_texts = [{"text": f.text, "meta": f.meta} for f in facts]
         
         # Build action catalog summary for reference
-        catalog_summary = [{"name": t.name, "required_args": t.required_args} for t in self.action_catalog]
+        catalog_summary = [{"name": t.key, "required_args": t.required_args} for t in self.action_catalog]
         
         # Use prompt from database if available, otherwise use default
         prompt_template = self.prompts.get('adapt_plan', '')
         if prompt_template:
-            # Replace placeholders in the prompt template (support multiple formats)
-            prompt = prompt_template
+            # Compute values for tokens
             sig_text = sig.to_text()
             example_cases_json = json.dumps(example_cases, indent=2)
             fact_texts_json = json.dumps(fact_texts, indent=2)
             catalog_summary_json = json.dumps(catalog_summary, indent=2)
             plan_id = uuid.uuid4().hex[:8]
             
-            # Replace common placeholder formats
-            prompt = prompt.replace('{sig_text}', sig_text).replace('{{sig_text}}', sig_text)
-            prompt = prompt.replace('{sig.to_text()}', sig_text).replace('{{sig.to_text()}}', sig_text)
-            prompt = prompt.replace('{example_cases}', example_cases_json).replace('{{example_cases}}', example_cases_json)
-            prompt = prompt.replace('{json.dumps(example_cases, indent=2)}', example_cases_json)
-            prompt = prompt.replace('{fact_texts}', fact_texts_json).replace('{{fact_texts}}', fact_texts_json)
-            prompt = prompt.replace('{json.dumps(fact_texts, indent=2)}', fact_texts_json)
-            prompt = prompt.replace('{catalog_summary}', catalog_summary_json).replace('{{catalog_summary}}', catalog_summary_json)
-            prompt = prompt.replace('{json.dumps(catalog_summary, indent=2)}', catalog_summary_json)
-            prompt = prompt.replace('{plan_id}', plan_id).replace('{{plan_id}}', plan_id)
+            # Replace tokens with computed values
+            replacements = {
+                'sig_text': sig_text,
+                'example_cases': example_cases_json,
+                'fact_texts': fact_texts_json,
+                'catalog_summary': catalog_summary_json,
+                'plan_id': plan_id
+            }
+            prompt = self._replace_tokens(prompt_template, replacements)
         else:
             # Fallback to default hardcoded prompt
             prompt = f"""
@@ -972,9 +1019,15 @@ class ERAAgentV2_2:
             - The plan should end where it started!
         """
         data = self.llm.complete_json(prompt)
+        if not data or "plan" not in data:
+            print('[ERROR] LLM returned invalid plan structure')
+            return Plan(id=uuid.uuid4().hex[:8], steps=[], meta={"strategy": "adapted", "error": "LLM returned invalid plan"})
+        
         # Create steps
         steps = []
-        for s in data["plan"]["steps"]:
+        for idx, s in enumerate(data["plan"]["steps"]):
+            if "action" not in s or not s.get("action"):
+                print(f'[WARNING] Step {idx} missing or empty action field! Step data: {s}')
             # Ensure all required fields are present
             if "step_id" not in s:
                 s["step_id"] = len(steps)  # Fallback to sequential
@@ -982,7 +1035,12 @@ class ERAAgentV2_2:
                 s["depends_on"] = []
             if "next_step" not in s:
                 s["next_step"] = None
-            steps.append(PlanStep(**s))
+            try:
+                steps.append(PlanStep(**s))
+            except Exception as e:
+                print(f'[ERROR] Failed to create PlanStep from step {idx}: {e}')
+                print(f'[ERROR] Step data: {json.dumps(s, indent=2, cls=DecimalEncoder)}')
+                continue
         plan = Plan(id=data["plan"]["id"], steps=steps, meta=data["plan"].get("meta", {}))
         print('Raw adapted plan:')
         print(json.dumps({"id": plan.id, "meta": plan.meta, "steps": [asdict(s) for s in plan.steps]}, indent=2, cls=DecimalEncoder))
@@ -995,7 +1053,7 @@ class ERAAgentV2_2:
     def compose_from_skills(self, sig: Signature, skills: List[VDBItem]) -> Plan:
         print('Composing a new plan from scratch based on the user request...')
         catalog = [{
-            "name": t.name,
+            "name": t.key,
             "description": t.description,
             "required_args": t.required_args,
             "optional_args": t.optional_args,
@@ -1005,22 +1063,20 @@ class ERAAgentV2_2:
         # Use prompt from database if available, otherwise use default
         prompt_template = self.prompts.get('compose_plan', '')
         if prompt_template:
-            # Replace placeholders in the prompt template (support multiple formats)
-            prompt = prompt_template
+            # Compute values for tokens
             sig_text = sig.to_text()
             catalog_json = json.dumps(catalog, indent=2)
             skills_json = json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2)
             plan_id = uuid.uuid4().hex[:8]
             
-            # Replace common placeholder formats
-            prompt = prompt.replace('{sig_text}', sig_text).replace('{{sig_text}}', sig_text)
-            prompt = prompt.replace('{sig.to_text()}', sig_text).replace('{{sig.to_text()}}', sig_text)
-            prompt = prompt.replace('{catalog}', catalog_json).replace('{{catalog}}', catalog_json)
-            prompt = prompt.replace('{json.dumps(catalog, indent=2)}', catalog_json)
-            prompt = prompt.replace('{skills}', skills_json).replace('{{skills}}', skills_json)
-            prompt = prompt.replace('{json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2)}', skills_json)
-            prompt = prompt.replace('{plan_id}', plan_id).replace('{{plan_id}}', plan_id)
-            prompt = prompt.replace('{uuid.uuid4().hex[:8]}', plan_id)
+            # Replace tokens with computed values
+            replacements = {
+                'sig_text': sig_text,
+                'catalog': catalog_json,
+                'skills': skills_json,
+                'plan_id': plan_id
+            }
+            prompt = self._replace_tokens(prompt_template, replacements)
         else:
             # Fallback to default hardcoded prompt
             prompt = f"""
@@ -1166,9 +1222,15 @@ class ERAAgentV2_2:
             - The plan should form a complete round trip!
         """
         data = self.llm.complete_json(prompt)
+        if not data or "plan" not in data:
+            print('[ERROR] LLM returned invalid plan structure')
+            return Plan(id=uuid.uuid4().hex[:8], steps=[], meta={"strategy": "compose", "error": "LLM returned invalid plan"})
+        
         # Create steps
         steps = []
-        for s in data["plan"]["steps"]:
+        for idx, s in enumerate(data["plan"]["steps"]):
+            if "action" not in s or not s.get("action"):
+                print(f'[WARNING] Step {idx} missing or empty action field! Step data: {s}')
             # Ensure all required fields are present
             if "step_id" not in s:
                 s["step_id"] = len(steps)  # Fallback to sequential
@@ -1176,7 +1238,12 @@ class ERAAgentV2_2:
                 s["depends_on"] = []
             if "next_step" not in s:
                 s["next_step"] = None
-            steps.append(PlanStep(**s))
+            try:
+                steps.append(PlanStep(**s))
+            except Exception as e:
+                print(f'[ERROR] Failed to create PlanStep from step {idx}: {e}')
+                print(f'[ERROR] Step data: {json.dumps(s, indent=2, cls=DecimalEncoder)}')
+                continue
         plan = Plan(id=data["plan"]["id"], steps=steps, meta=data["plan"].get("meta", {}))
         print('Raw composed plan:')
         print(json.dumps({"id": plan.id, "meta": plan.meta, "steps": [asdict(s) for s in plan.steps]}, indent=2, cls=DecimalEncoder))
@@ -1220,19 +1287,18 @@ class ERAAgentV2_2:
         # Use prompt from database if available, otherwise use default
         prompt_template = self.prompts.get('select_best_plan', '')
         if prompt_template:
-            # Replace placeholders in the prompt template (support multiple formats)
-            prompt = prompt_template
+            # Compute values for tokens
             sig_text = sig.to_text()
             activities_json = json.dumps(activities_requested, indent=2)
             plan_details_json = json.dumps(plan_details, indent=2)
             
-            # Replace common placeholder formats
-            prompt = prompt.replace('{sig_text}', sig_text).replace('{{sig_text}}', sig_text)
-            prompt = prompt.replace('{sig.to_text()}', sig_text).replace('{{sig.to_text()}}', sig_text)
-            prompt = prompt.replace('{activities_requested}', activities_json).replace('{{activities_requested}}', activities_json)
-            prompt = prompt.replace('{json.dumps(activities_requested, indent=2)}', activities_json)
-            prompt = prompt.replace('{plan_details}', plan_details_json).replace('{{plan_details}}', plan_details_json)
-            prompt = prompt.replace('{json.dumps(plan_details, indent=2)}', plan_details_json)
+            # Replace tokens with computed values
+            replacements = {
+                'sig_text': sig_text,
+                'activities_requested': activities_json,
+                'plan_details': plan_details_json
+            }
+            prompt = self._replace_tokens(prompt_template, replacements)
         else:
             # Fallback to default hardcoded prompt
             prompt = f"""
@@ -1293,19 +1359,30 @@ class ERAAgentV2_2:
     # Validator: ensure known actions + required args are present
     def _validate_and_patch_plan(self, plan: Plan) -> Plan:
         print(f'Validating plan with {len(plan.steps)} steps...')
-        known = {t.name: t for t in self.action_catalog}
+        known = {t.key: t for t in self.action_catalog}
         validated: List[PlanStep] = []
         for s in plan.steps:
-            print(f'  Validating step {s.step_id}: action={s.action}, inputs={s.inputs}')
+            print(f'  Validating step {s.step_id}: action={repr(s.action)}, action_type={type(s.action)}, inputs={s.inputs}')
+            
+            # Check if action is empty or None
+            if not s.action or s.action == "":
+                print(f'    REJECTED: empty or missing action field (value: {repr(s.action)})')
+                continue
+            
+            # Check if action is in catalog
             if s.action not in known:
                 print(f'    REJECTED: unknown action "{s.action}"')
                 continue
+            
             spec = known[s.action]
             inputs = s.inputs or {}
+            
             missing = [a for a in spec.required_args if a not in inputs]
             if missing:
                 print(f'    REJECTED: missing required args {missing}')
+                provided_keys = list(inputs.keys()) if inputs else []
                 continue
+            
             # Populate optional fields if not present
             if not s.success_criteria and spec.success_criteria_hint:
                 s.success_criteria = spec.success_criteria_hint
@@ -1501,10 +1578,10 @@ class GeneratePlan:
                     # Get success criteria from verification field if available
                     success_criteria_hint = item.get('verification', '')
                     
-                    if name or key:
-                        action_name = name or key
+                    if key:
+                        action_key = key
                         actions.append(ActionSpec(
-                            name=action_name,
+                            key=action_key,
                             description=description,
                             required_args=required_args if required_args else [],
                             optional_args=optional_args if optional_args else [],
@@ -1546,10 +1623,10 @@ class GeneratePlan:
     
     
     
-    def build_agent_v2_2(self, portfolio: str, org: str, 
+    def build_plan_generator(self, portfolio: str, org: str, 
                          prompt_ring: str = "pes_prompts",
                          action_ring: str = "schd_actions",
-                         case_ring: str = "pes_cases") -> ERAAgentV2_2:
+                         case_ring: str = "pes_cases") -> PlanAgent:
         embedder = SimpleEmbedder()
         vdb = VectorDB(embedder)
         # Pass the AgentUtilities instance to AIResponsesLLM
@@ -1569,28 +1646,28 @@ class GeneratePlan:
             print('Warning: No actions loaded from database, using fallback actions')
             action_catalog = [
                 ActionSpec(
-                    name="quote_flight",
+                    key="quote_flight",
                     description="Search and quote flights between two airports for given date and number of passengers.",
                     required_args=["from_airport_code", "to_airport_code", "departure_date"],
                     optional_args=["return_date", "passengers", "cabin_class", "direct_only", "leg"],
                     success_criteria_hint="len(result) > 0 and result[0].get('flight')"
                 ),
                 ActionSpec(
-                    name="quote_hotel",
+                    key="quote_hotel",
                     description="Search business hotels in a target area and budget.",
-                    required_args=["city", "area", "check-in-date", "number-of-nights"],
+                    required_args=["city", "area", "check_in_date", "number_of_nights"],
                     optional_args=["budget", "amenities"],
                     success_criteria_hint="len(result) > 0"
                 ),
                 ActionSpec(
-                    name="rent_bike",
+                    key="rent_bike",
                     description="Reserve bikes for business travelers or leisure.",
                     required_args=["rider_count", "pickup_area"],
                     optional_args=["bike_type"],
                     success_criteria_hint="result.get('confirmed') == True"
                 ),
                 ActionSpec(
-                    name="map_route",
+                    key="map_route",
                     description="Plan a walking/biking route for efficient navigation.",
                     required_args=[],
                     optional_args=["max_minutes", "avoid_hills"],
@@ -1635,7 +1712,7 @@ class GeneratePlan:
                                 next_step=1)),
                 asdict(PlanStep(step_id=1, title="Find Midtown business hotel",
                                 action="quote_hotel",
-                                inputs={"city":"New York City","area":"Midtown Manhattan","budget":"mid","check-in-date":"2026-07-15","number-of-nights":5},
+                                inputs={"city":"New York City","area":"Midtown Manhattan","budget":"mid","check_in_date":"2026-07-15","number_of_nights":5},
                                 enter_guard="True",
                                 success_criteria="len(result) > 0",
                                 depends_on=[],
@@ -1679,7 +1756,7 @@ class GeneratePlan:
                                 next_step=1)),
                 asdict(PlanStep(step_id=1, title="Book NYC hotel",
                                 action="quote_hotel",
-                                inputs={"city":"New York City","area":"Midtown Manhattan","budget":"high","check-in-date":"2026-12-20","number-of-nights":3},
+                                inputs={"city":"New York City","area":"Midtown Manhattan","budget":"high","check_in_date":"2026-12-20","number_of_nights":3},
                                 enter_guard="True",
                                 success_criteria="len(result) > 0",
                                 depends_on=[],
@@ -1693,7 +1770,7 @@ class GeneratePlan:
                                 next_step=3)),
                 asdict(PlanStep(step_id=3, title="Book DC hotel",
                                 action="quote_hotel",
-                                inputs={"city":"Washington DC","area":"Downtown DC","budget":"high","check-in-date":"2026-12-23","number-of-nights":4},
+                                inputs={"city":"Washington DC","area":"Downtown DC","budget":"high","check_in_date":"2026-12-23","number_of_nights":4},
                                 enter_guard="True",
                                 success_criteria="len(result) > 0",
                                 depends_on=[],
@@ -1731,7 +1808,7 @@ class GeneratePlan:
                                 next_step=1)),
                 asdict(PlanStep(step_id=1, title="Book SOMA district hotel",
                                 action="quote_hotel",
-                                inputs={"city":"San Francisco","area":"SOMA District","budget":"mid","check-in-date":"2026-04-10","number-of-nights":4},
+                                inputs={"city":"San Francisco","area":"SOMA District","budget":"mid","check_in_date":"2026-04-10","number_of_nights":4},
                                 enter_guard="True",
                                 success_criteria="len(result) > 0",
                                 depends_on=[],
@@ -1837,7 +1914,7 @@ class GeneratePlan:
                 text="Activities should be inserted between hotel check-in and departure, in chronological order based on dates and timing.",
                 meta={})
 
-        return ERAAgentV2_2(vdb=vdb, llm=llm, action_catalog=action_catalog, prompts=prompts)
+        return PlanAgent(vdb=vdb, llm=llm, action_catalog=action_catalog, prompts=prompts)
 
 
     
@@ -1873,15 +1950,15 @@ class GeneratePlan:
             
             
             results = []
-            print('Initializing agent_v2_2')
-            agent = self.build_agent_v2_2(
+            print('Initializing PES>GeneratePlan')
+            agent = self.build_plan_generator(
                 portfolio=context.portfolio,
                 org=context.org,
                 prompt_ring="pes_prompts",  # Can be made configurable
                 action_ring="schd_actions",  # Can be made configurable
                 case_ring="pes_cases"  # Can be made configurable
             )
-            print('Finished building agent_v2_2')
+            print('Finished building Plan Generator')
             
             req = {
             "request":payload["message"]
