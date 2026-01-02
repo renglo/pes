@@ -1,0 +1,12 @@
+# PES Handlers Requirements
+
+# Core dependencies
+requests>=2.32.0  # HTTP requests
+google-search-results>=2.4.2  # SerpAPI for search functionality
+
+# Tank library (required for integration)
+# Install via: pip install -e ../../dev/renglo-lib
+
+
+
+

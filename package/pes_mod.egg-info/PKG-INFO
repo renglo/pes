@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: pes-mod
+Version: 1.0.0
+Summary: PES custom handlers, blueprints, and utilities
+Author: PES Team
+Requires-Python: >=3.12
+Requires-Dist: requests>=2.32.0
+Requires-Dist: google-search-results>=2.4.2
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+Dynamic: requires-python
