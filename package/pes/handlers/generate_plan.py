@@ -550,215 +550,53 @@ class PlanAgent:
             print('[WARNING] No prompt template found, using fallback hardcoded prompt')
             # Fallback to default hardcoded prompt (for backward compatibility)
             prompt = f"""
-            You are a systems normalizer for an experience-retrieval planning agent specializing in complex tasks.
+            You are a systems normalizer for an experience-retrieval planning agent.
             TASK: TO_SIGNATURE
-            Goal: Analyze the user's request and extract structured information into a normalized Signature.
+            Goal: Analyze the user's request and extract ALL facts and details into a structured Signature object.
             
-            CRITICAL: Read the USER REQUEST carefully and extract ALL details mentioned.
+            CRITICAL: Read the USER REQUEST carefully and extract ALL information mentioned, including:
+            - Entities (people, places, objects, organizations)
+            - Actions and activities requested
+            - Dates, times, and durations
+            - Quantities and measurements
+            - Constraints and requirements
+            - Preferences and specifications
+            - Relationships between entities
+            - Any other relevant facts
             
-            Return ONLY a compact JSON with keys like:
-            ["domain","goal","destination","party","dates","constraints","preferences","activities","extras"]
+            Return ONLY a compact JSON object with these standard keys:
+            ["domain", "goal", "destination", "party", "dates", "constraints", "preferences", "activities", "extras"]
             
-            REQUIRED FIELDS (never leave these as null):
-            - domain: Always "travel" for travel requests
-            - goal: Brief description of trip purpose (e.g., "business meeting", "conference", "client visit")
-            - destination: The city/location they're traveling TO
-            - party: Object with traveler count and roles (e.g., {{"travelers": 4, "roles": ["executive"]}})
-            - activities: Array of requested activities/services with structured details
-            - extras: MUST include "origin" (where they're traveling FROM) and "trip_type"
-            
-            ACTIVITIES FIELD:
-            - Extract ALL requested activities, tours, events, or services
-            - Structure each activity as: {{"type": "activity_type", "description": "details", "location": "where", "when": "timing"}}
-            - Common types: "city_tour", "restaurant", "theater", "museum", "day_trip", "conference", "meeting", "spa", "shopping"
-            - Examples:
-              * "city tour" → {{"type": "city_tour", "description": "guided city tour", "location": "destination_city"}}
-              * "dinner in good restaurant" → {{"type": "restaurant", "description": "dinner at upscale restaurant", "preferences": ["fine_dining"]}}
-              * "theater show" → {{"type": "theater", "description": "Broadway show", "location": "destination_city"}}
-            - If no activities requested, set to empty array []
-            
-            HANDLING DIFFERENT TRIP TYPES:
-            
-            1. SIMPLE SINGLE-CITY TRIP (Origin → Destination → Origin, no other cities visited):
-               - destination: "CityName"
-               - extras.origin: "OriginCity"
-               - extras.trip_type: "single_destination"
-               - NO itinerary array needed (simple round trip)
-               - activities array contains what they do IN that one city
-            
-            2. MULTI-CITY TRIP (A → B → C → ... → A):
-               - destination: "PrimaryDestination"  (where they're staying longest or main city)
-               - extras.origin: "StartCity"
-               - extras.trip_type: "multi_city"
-               - extras.itinerary: [
-                   {{"from": "CityA", "to": "CityB", "date": "YYYY-MM-DD"}},
-                   {{"from": "CityB", "to": "CityC", "date": "YYYY-MM-DD"}},
-                   {{"from": "CityC", "to": "CityA", "date": "YYYY-MM-DD"}}  // return leg
-                 ]
-               - activities array contains what they do at each city
-               - INCLUDES day trips to other cities during a main stay:
-                 * Example: Stay in NYC, day trip to Philadelphia
-                 * trip_type: "multi_city" (because visiting multiple cities)
-                 * itinerary includes: origin → NYC → Philadelphia → NYC → origin
-                 * activities includes the day trip activity
-            
-            3. CONVERGING TRAVELERS (Multiple origins → Single destination):
-               - destination: "MeetingCity"
-               - extras.trip_type: "converging"
-               - extras.travelers: [
-                   {{"count": N, "origin": "CityX", "arrival_date": "YYYY-MM-DD"}},
-                   {{"count": M, "origin": "CityY", "arrival_date": "YYYY-MM-DD"}}
-                 ]
-               - extras.return_date: "YYYY-MM-DD"  (common return or per traveler)
-            
-            4. DAY TRIP / SAME-DAY RETURN (Origin → Destination → Origin SAME DAY, no overnight):
-               - Use ONLY when the ENTIRE TRIP is same-day return from origin
-               - destination: "CityName"
-               - extras.origin: "OriginCity"
-               - extras.trip_type: "day_trip"
-               - extras.venue: "VenueName or Address"  (optional - where they're going)
-               - dates: {{"date": "YYYY-MM-DD"}}  (same day for both flights)
-               - activities array contains what they do during the day trip
-               - NOTE: If staying in City A and taking day trip to City B, that's "multi_city", NOT "day_trip"
+            FIELD DESCRIPTIONS:
+            - domain: The domain or category this request belongs to (e.g., "travel", "procurement", "logistics", etc.)
+            - goal: Brief description of the main objective or purpose
+            - destination: Primary target location, entity, or endpoint
+            - party: Object describing participants (count, roles, attributes)
+            - dates: Object with temporal information (start, end, duration, deadlines)
+            - constraints: Array of limitations, requirements, or restrictions
+            - preferences: Array of desired attributes, options, or specifications
+            - activities: Array of requested actions, services, or tasks with structured details
+            - extras: Object for any additional domain-specific or context-specific information
             
             EXTRACTION RULES:
-            - ALWAYS set domain to "travel"
-            - Identify trip purpose for goal field
-            - Identify if trip involves multiple destinations in sequence (multi-city)
-            - Identify if multiple travelers are coming from different origins (converging)
-            - Identify if same-day return (day trip)
-            - Extract ALL cities mentioned: origin city (where FROM) and destination city (where TO)
-            - Extract ALL dates with their associated legs
-            - For multi-city: create complete itinerary including return leg to origin
-            - Extract party details (total count, roles, special needs)
-            - Include any special requirements (wheelchair, dietary, etc.) in constraints or party
-            
-            CRITICAL: ITINERARY vs ACTIVITIES:
-            - extras.itinerary = Physical city-to-city movements (creates flights/transportation)
-            - activities = What travelers DO at each location (tours, dinners, meetings)
-            - A "day trip to Philadelphia" creates BOTH:
-              * extras.itinerary entry: NYC → Philadelphia → NYC (with dates)
-              * activities entry: {{"type": "day_trip", "location": "Philadelphia"}}
-            - ALWAYS create itinerary entries when request mentions visiting other cities
+            - Extract ALL facts mentioned in the request
+            - Structure information logically into the appropriate fields
+            - Use arrays for multiple items (activities, constraints, preferences)
+            - Use objects for structured data (party, dates, extras)
+            - If a field doesn't apply, set it to null or an empty array/object
+            - Preserve all quantitative and qualitative details
             
             DATES FORMAT:
-            - Convert relative dates to approximate YYYY-MM-DD format
-            - For "X days" duration, calculate return date
-            - If no specific date mentioned, use "estimated_date"
+            - Convert relative dates to approximate YYYY-MM-DD format when possible
+            - For durations, calculate end dates from start dates
+            - If no specific date mentioned, use "estimated_date" or null
             - Consider the current time and date when scheduling
             - Current time is : "{current_time}"
             
             USER REQUEST TEXT:
             "{request_text}"
             
-            ANALYZE THE REQUEST ABOVE AND EXTRACT:
-            1. How many people are traveling?
-            2. What are their roles? (executives, technicians, etc.)
-            3. Where are they traveling FROM? (origin)
-            4. Where are they traveling TO? (primary destination)
-            5. Are they visiting OTHER CITIES during the trip? (creates itinerary + activities)
-            6. When? (dates)
-            7. Is it same-day return from origin, overnight stay, or multi-city journey?
-            8. What's the purpose?
-            9. What activities/services are requested? (tours, dinners, meetings, etc.)
-            
-            EXAMPLES:
-            
-            Request: "Fly from Boston to NYC for 3 days"
-            Output: {{
-              "domain": "travel",
-              "goal": "leisure trip",
-              "destination": "New York City",
-              "activities": [],
-              "extras": {{
-                "origin": "Boston",
-                "trip_type": "single_destination"
-              }},
-              "dates": {{"departure": "...", "duration_days": 3}}
-            }}
-            
-            Request: "Group from Milan wants NYC trip with city tour and dinner"
-            Output: {{
-              "domain": "travel",
-              "goal": "group leisure trip",
-              "destination": "New York City",
-              "activities": [
-                {{"type": "city_tour", "description": "guided city tour", "location": "New York City"}},
-                {{"type": "restaurant", "description": "dinner at upscale restaurant", "preferences": ["fine_dining"]}}
-              ],
-              "extras": {{
-                "origin": "Milan",
-                "trip_type": "single_destination"
-              }}
-            }}
-            
-            Request: "42 people from Milan to NYC for 4 nights, want city tour, dinner, and day trip to Philadelphia"
-            Output: {{
-              "domain": "travel",
-              "goal": "group leisure trip",
-              "destination": "New York City",
-              "party": {{"travelers": 42}},
-              "activities": [
-                {{"type": "city_tour", "description": "guided city tour", "location": "New York City"}},
-                {{"type": "restaurant", "description": "dinner at upscale restaurant", "preferences": ["fine_dining"]}},
-                {{"type": "day_trip", "description": "day trip to Philadelphia", "location": "Philadelphia"}}
-              ],
-              "extras": {{
-                "origin": "Milan",
-                "trip_type": "multi_city",
-                "itinerary": [
-                  {{"from": "Milan", "to": "New York City", "date": "arrival_date"}},
-                  {{"from": "New York City", "to": "Philadelphia", "date": "during_stay"}},
-                  {{"from": "Philadelphia", "to": "New York City", "date": "same_day"}},
-                  {{"from": "New York City", "to": "Milan", "date": "departure_date"}}
-                ]
-              }},
-              "dates": {{"start": "arrival_date", "end": "departure_date", "duration_nights": 4}}
-            }}
-            
-            Request: "Two technicians fly from Sao Paulo to Denver (Nov 20) then Newark (Nov 23)"
-            Output: {{
-              "domain": "travel",
-              "destination": "Newark",
-              "party": {{"travelers": 2, "roles": ["technician"]}},
-              "extras": {{
-                "origin": "Sao Paulo",
-                "trip_type": "multi_city",
-                "itinerary": [
-                  {{"from": "Sao Paulo", "to": "Denver", "date": "2026-11-20"}},
-                  {{"from": "Denver", "to": "Newark", "date": "2026-11-23"}},
-                  {{"from": "Newark", "to": "Sao Paulo", "date": "estimated_return"}}
-                ]
-              }}
-            }}
-            
-            Request: "3 people from Boston and 2 from Chicago meeting in NYC for conference Dec 5-8"
-            Output: {{
-              "domain": "travel",
-              "destination": "New York City",
-              "party": {{"total_travelers": 5}},
-              "extras": {{
-                "trip_type": "converging",
-                "travelers": [
-                  {{"count": 3, "origin": "Boston", "arrival_date": "2026-12-05"}},
-                  {{"count": 2, "origin": "Chicago", "arrival_date": "2026-12-05"}}
-                ],
-                "return_date": "2026-12-08"
-              }},
-              "dates": {{"start": "2026-12-05", "end": "2026-12-08"}}
-            }}
-            
-            Request: "Four executives fly to Lima from Sao Paulo in the morning and back the same day"
-            Output: {{
-              "domain": "travel",
-              "destination": "Lima",
-              "party": {{"travelers": 4, "roles": ["executive"]}},
-              "extras": {{
-                "origin": "Sao Paulo",
-                "trip_type": "day_trip"
-              }},
-              "dates": {{"date": "estimated_date"}}
-            }}
+            ANALYZE THE REQUEST ABOVE AND EXTRACT ALL FACTS into the structured Signature format.
         """
         # Note: Token replacement is already handled by _replace_tokens() above
         # This fallback section uses hardcoded prompt with old format for backward compatibility
@@ -856,84 +694,29 @@ class PlanAgent:
         else:
             # Fallback to default hardcoded prompt
             prompt = f"""
-            You are an expert travel planner using case-based reasoning.
+            You are a planning agent using case-based reasoning.
             TASK: ADAPT_PLAN
             
             INSTRUCTIONS:
-            1. Study the EXAMPLE CASES below to understand travel planning patterns and structure
-            2. Analyze the NEW REQUEST to determine trip type (single-city, multi-city, or converging travelers)
-            3. Generate a COMPLETE NEW plan using patterns but with CORRECT details from the new request
+            1. Study the EXAMPLE CASES below to understand planning patterns and structure
+            2. Analyze the NEW REQUEST (signature) to identify all facts and requirements
+            3. Generate a COMPLETE NEW plan by adapting the example patterns to match the new request's facts
             
-            CRITICAL COMPLETENESS RULE:
-            - EVERY plan MUST include a return flight to the ORIGINAL ORIGIN (where the journey started)
-            - If there are intermediate activities (tours, day trips, side trips), include them BUT also the final return home
-            - Example: Milan → NYC (stay 4 nights + activities) → Milan (return flight)
-            - Example: Milan → NYC → Philadelphia (day trip) → NYC → Milan (return flight)
+            ADAPTATION PROCESS:
+            - Extract the structure and sequence from example cases
+            - Replace example values with facts from the new signature
+            - Ensure all requirements from the signature are addressed
+            - Maintain logical flow and dependencies from examples
+            - Adapt step sequences to match the new request's specifics
             
-            TRIP TYPE HANDLING:
-            
-            A. SINGLE-CITY TRIP (extras.trip_type == "single_destination"):
-               - Outbound flight: origin → destination
-               - Hotel at destination
-               - [Include REQUESTED ACTIVITIES from signature.activities array - see below]
-               - Return flight: destination → origin (MUST ALWAYS INCLUDE)
-            
-            INCORPORATING ACTIVITIES:
-            - Check signature.activities array for requested services
-            - For each activity in the array, create appropriate plan steps
-            - Examples:
-              * {{"type": "city_tour"}} → Add step using appropriate tour action
-              * {{"type": "restaurant"}} → Add step for restaurant reservation
-              * {{"type": "day_trip", "location": "OtherCity"}} → Add round-trip flights + activity
-            - Place activities in chronological order during the stay
-            - If actions don't exist for an activity, note it in plan.meta but don't skip it
-            
-            B. MULTI-CITY TRIP (extras.trip_type == "multi_city"):
-               - Read extras.itinerary array for complete journey
-               - For each leg in itinerary:
-                 * Flight from → to with specified date
-                 * Hotel booking (if overnight stay)
-               - CRITICAL: Follow the EXACT sequence in itinerary including return leg
-            
-            C. CONVERGING TRAVELERS (extras.trip_type == "converging"):
-               - Read extras.travelers array
-               - For EACH traveler group:
-                 * Flight from their origin → destination
-               - Single hotel booking at destination
-               - For EACH traveler group:
-                 * Return flight destination → their origin
-            
-            D. DAY TRIP (extras.trip_type == "day_trip"):
-               - Outbound flight: origin → destination (morning/early)
-               - NO HOTEL (same day return)
-               - Return flight: destination → origin (evening/late)
-            
-            E. SIDE TRIP DURING MAIN TRIP:
-               - If request mentions activities/day trips to OTHER CITIES during a main stay:
-                 * Treat as intermediate activities within the main trip
-                 * Include round-trip to the side destination (e.g., NYC → Philadelphia → NYC)
-                 * Then continue with main trip completion (NYC → origin)
-                 * Example: Milan → NYC [stay] → Philadelphia [day trip] → NYC [continue stay] → Milan [return]
-            
-            AIRPORT CODES:
-            - Determine correct airport codes for ALL cities (e.g., GRU for Sao Paulo, DEN for Denver, EWR for Newark)
-            - Use major airports for each city
-            
-            DATES & PASSENGERS:
-            - Use dates from signature (dates field or extras.itinerary)
-            - Use passenger count from party field
-            - For multi-city: use date from each itinerary leg
-            - For converging: use arrival_date for each traveler group
-            
-            FLIGHT LEG PARAMETER:
-            - For ALL quote_flight actions, include the "leg" parameter in inputs
-            - The leg represents the chronological order of flights in the trip (0-based index)
-            - First flight chronologically = leg: 0, second flight = leg: 1, third = leg: 2, etc.
-            - For single-city trips: outbound flight = leg: 0, return flight = leg: 1
-            - For multi-city trips: assign leg numbers in chronological order based on departure dates
-            - For day trips: outbound = leg: 0, return = leg: 1
-            - For converging travelers: assign leg numbers chronologically across all traveler groups
-            - Example: Sao Paulo → Denver (leg: 0), Denver → Newark (leg: 1), Newark → Sao Paulo (leg: 2)
+            INCORPORATING SIGNATURE FACTS:
+            - Use all information from the signature (domain, goal, destination, party, dates, etc.)
+            - Check signature.activities array for requested actions/services
+            - For each activity, create appropriate plan steps using available actions
+            - Use dates from signature.dates or signature.extras for timing
+            - Use party information for quantities and participant details
+            - Apply constraints and preferences from the signature
+            - Place activities in chronological order based on dates
             
             NEW REQUEST (use these details for all inputs):
             ```json
@@ -990,33 +773,23 @@ class PlanAgent:
             - step_id: Sequential integer starting from 0 (0, 1, 2, 3, ...)
             - depends_on: Array of step_id integers that this step depends on
             - next_step: The step_id of the next step in execution order, or null for the last step
-            
-            STEP TITLE FORMATTING (CRITICAL):
-            - Use directional titles that clearly indicate FROM → TO cities/airports
-            - Format: "[City/Airport] to [City/Airport] flight" (e.g., "Seattle to Orlando flight")
-            - NEVER use the word "return" in step titles - flights are booked independently without trip context
-            - Examples:
-              * Outbound: "Seattle to Orlando flight" (NOT "Return flight from Seattle to Orlando")
-              * Intermediate: "Orlando to Miami flight" (NOT "Return flight from Orlando to Miami")
-              * Final leg: "Miami to Seattle flight" (NOT "Miami to Seattle return flight")
-            - For hotels: Use "[City] hotel booking" or "[Area] hotel"
-            - For activities: Use descriptive names like "City tour in [Location]" or "Restaurant reservation"
-            - Titles must be unambiguous - each step executes independently without full trip context
+            - title: Clear, descriptive title for the step
+            - action: Must match an action name from the ACTION CATALOG
+            - inputs: Object with all required_args from the action spec, plus any optional_args
+            - enter_guard: Boolean expression (typically "True")
+            - success_criteria: Expression to evaluate step success
             
             CHRONOLOGICAL ORDER (CRITICAL):
             - Steps MUST be listed in the order they occur in time
             - step_id values MUST be sequential: 0, 1, 2, 3...
             - next_step links to the following step (step 0 → 1 → 2 → 3 → null)
-            - Correct sequence: Arrival flight → Hotel → Departure flight
-            
-            
-            CRITICAL: Check extras.trip_type and extras.itinerary/travelers to determine correct plan structure!
+            - Ensure dependencies are satisfied (depends_on steps execute before dependent steps)
             
             FINAL VALIDATION BEFORE RETURNING:
-            - Does the LAST step return travelers to their ORIGINAL ORIGIN?
-            - If origin is "Milan" and destination is "NYC", the final flight MUST be NYC → Milan
-            - If there are side trips (e.g., Philadelphia), those are in the middle, not the end
-            - The plan should end where it started!
+            - Does the plan address ALL requirements from the signature?
+            - Are all signature.activities represented in plan steps?
+            - Are dates and timing constraints respected?
+            - Is the plan logically complete and executable?
         """
         data = self.llm.complete_json(prompt)
         if not data or "plan" not in data:
@@ -1080,99 +853,52 @@ class PlanAgent:
         else:
             # Fallback to default hardcoded prompt
             prompt = f"""
-            You are a planner that composes a COMPLETE executable travel plan using ONLY the allowed actions.
+            You are a planner that composes a COMPLETE executable plan using ONLY the allowed actions.
             TASK: COMPOSE_PLAN
             
-            CRITICAL COMPLETENESS RULE:
-            - EVERY plan MUST include a return flight to the ORIGINAL ORIGIN (where the journey started)
-            - If there are intermediate activities (tours, day trips, side trips), include them BUT also the final return home
-            - The plan is NOT complete until travelers return to where they started
-            - Example: Milan → NYC (stay 4 nights + city tour + day trip to Philadelphia) → Milan (return flight)
+            INSTRUCTIONS:
+            - Analyze the signature to understand all requirements and facts
+            - Use the ACTION CATALOG to determine available actions and their required inputs
+            - Reference the SKILLS for semantic hints and best practices
+            - Create a complete plan that addresses all signature requirements
             
-            ANALYZE TRIP TYPE from Signature extras.trip_type:
+            PLAN COMPOSITION:
+            - Start with initial steps that establish prerequisites
+            - Add steps for each activity or requirement from the signature
+            - Ensure all signature.activities are represented as plan steps
+            - Respect dates, timing, and sequencing from the signature
+            - Apply constraints and preferences from the signature
+            - Create a logical flow where steps build upon each other
             
-            A. SINGLE-CITY TRIP (extras.trip_type == "single_destination"):
-               Required sequence:
-               1. Flight: origin → destination
-               2. Hotel: at destination
-               3. [ACTIVITIES - read from signature.activities array and create steps for each]
-               4. Flight: destination → origin (MUST ALWAYS INCLUDE - return to starting point)
+            USING THE ACTION CATALOG:
+            - Each action has required_args that MUST be provided in step.inputs
+            - Optional_args can be included if relevant
+            - Use action.success_criteria_hint as a guide for step.success_criteria
+            - Ensure all action inputs are populated with values from the signature
             
-            INCORPORATING ACTIVITIES:
-            - Check signature.activities array for requested services
-            - For each activity, create steps using available actions or note in plan.meta
-            - Common activity types and how to handle them:
-              * "city_tour" → Use tour action if available, or note as manual booking needed
-              * "restaurant" → Use restaurant booking action if available, or note as manual reservation
-              * "day_trip" with location → Create round-trip flights for that day
-              * "theater", "museum", "spa" → Note as manual booking needed (no actions yet)
-            - Place activity steps in chronological order during the stay
+            INCORPORATING SIGNATURE INFORMATION:
+            - Use signature.domain to understand the context
+            - Use signature.goal to guide the overall plan structure
+            - Use signature.destination, party, dates for step inputs
+            - Use signature.activities to create corresponding plan steps
+            - Use signature.constraints and preferences to refine steps
+            - Use signature.extras for domain-specific requirements
             
-            B. MULTI-CITY TRIP (extras.trip_type == "multi_city"):
-               - Read extras.itinerary array
-               - For EACH leg in itinerary:
-                 1. Flight: from → to (with date from itinerary)
-                 2. Hotel: at city (if overnight)
-               - MUST cover ALL legs in itinerary including return
-               - Example: Sao Paulo → Denver → Newark → Sao Paulo = 3 flights
-            
-            C. CONVERGING TRAVELERS (extras.trip_type == "converging"):
-               - Read extras.travelers array
-               - Create separate flight  for EACH traveler group origin
-               - Single shared hotel at destination
-            
-            D. DAY TRIP (extras.trip_type == "day_trip"):
-               Required sequence (NO HOTEL):
-               1. Flight: origin → destination (morning/early flight)
-               2. Flight: destination → origin (evening/return flight)
-               - Use same date for both flights
-            
-            E. SIDE TRIP DURING MAIN TRIP:
-               - If request mentions activities/day trips to OTHER CITIES during a main stay:
-                 * Treat as intermediate activities within the main trip
-                 * Include round-trip to the side destination (e.g., NYC → Philadelphia → NYC)
-                 * Then continue with main trip completion (NYC → origin)
-                 * Example: Milan → NYC [stay] → Philadelphia [day trip] → NYC → Milan [return]
-                 * CRITICAL: Must still include final return to ORIGINAL ORIGIN
-            
-            AIRPORT DETERMINATION:
-            - Find major airport codes for ALL cities mentioned
-            - Examples: Sao Paulo=GRU, Denver=DEN, Newark=EWR, NYC=JFK, Chicago=ORD
-            
-            PASSENGERS:
-            - Single/Multi-city: use party.travelers or party.total_travelers
-            - Converging: use "count" from each traveler group in extras.travelers
-            
-            DATES:
-            - Single-city: use dates.departure and dates.return
-            - Multi-city: use "date" from each leg in extras.itinerary
-            - Converging: use arrival_date from extras.travelers, return_date from extras
-            
-            FLIGHT LEG PARAMETER:
-            - For ALL quote_flight actions, include the "leg" parameter in inputs
-            - The leg represents the chronological order of flights in the trip (0-based index)
-            - First flight chronologically = leg: 0, second flight = leg: 1, third = leg: 2, etc.
-            - For single-city trips: outbound flight = leg: 0, return flight = leg: 1
-            - For multi-city trips: assign leg numbers in chronological order based on departure dates
-            - For day trips: outbound = leg: 0, return = leg: 1
-            - For converging travelers: assign leg numbers chronologically across all traveler groups
-            - Example: Sao Paulo → Denver (leg: 0), Denver → Newark (leg: 1), Newark → Sao Paulo (leg: 2)
-            
-            Signature (CHECK extras.trip_type and extras.itinerary/travelers!):
+            Signature:
             ```json
             {sig.to_text()}
             ```
-
+            
             ACTION_CATALOG:
             ```json
             {json.dumps(catalog, indent=2)}
             ```
-
+            
             Top Skills (semantic hints):
             ```json
             {json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2)}
             ```
-
+            
             Return ONLY JSON:
             {{"plan": {{"id":"{uuid.uuid4().hex[:8]}", "meta": {{"strategy":"compose"}}, "steps": [PlanStep..]}}}}
             
@@ -1192,34 +918,24 @@ class PlanAgent:
             - step_id: Sequential integer starting from 0 (0, 1, 2, 3, ...)
             - depends_on: Array of step_id integers that this step depends on
             - next_step: The step_id of the next step in execution order, or null for the last step
-            
-            STEP TITLE FORMATTING (CRITICAL):
-            - Use directional titles that clearly indicate FROM → TO cities/airports
-            - Format: "[City/Airport] to [City/Airport] flight" (e.g., "Seattle to Orlando flight")
-            - NEVER use the word "return" in step titles - flights are booked independently without trip context
-            - Examples:
-              * Outbound: "Seattle to Orlando flight" (NOT "Return flight from Seattle to Orlando")
-              * Intermediate: "Orlando to Miami flight" (NOT "Return flight from Orlando to Miami")
-              * Final leg: "Miami to Seattle flight" (NOT "Miami to Seattle return flight")
-            - For hotels: Use "[City] hotel booking" or "[Area] hotel"
-            - For activities: Use descriptive names like "City tour in [Location]" or "Restaurant reservation"
-            - Titles must be unambiguous - each step executes independently without full trip context
+            - title: Clear, descriptive title for what this step accomplishes
+            - action: Must match an action name from the ACTION_CATALOG
+            - inputs: Object containing all required_args from the action spec, plus any optional_args
+            - enter_guard: Boolean expression (typically "True")
+            - success_criteria: Expression to evaluate whether the step succeeded
             
             CHRONOLOGICAL ORDER (CRITICAL):
             - Steps MUST be listed in the order they occur in time
             - step_id values MUST be sequential: 0, 1, 2, 3...
             - next_step links to the following step (step 0 → 1 → 2 → 3 → null)
-            - Correct sequence: Arrival flight → Hotel → Departure flight
-            
-            
-            CRITICAL: For multi-city trips, include a flight for EVERY leg in extras.itinerary!
+            - Ensure dependencies are satisfied (depends_on steps execute before dependent steps)
             
             FINAL VALIDATION BEFORE RETURNING:
-            - Does the LAST step return travelers to their ORIGINAL ORIGIN?
-            - Check extras.origin field to see where the journey started
-            - The final flight MUST go back to that origin city
-            - If there are side trips or day trips to other cities, those are in the middle, not the end
-            - The plan should form a complete round trip!
+            - Does the plan address ALL requirements from the signature?
+            - Are all signature.activities represented in plan steps?
+            - Are all action required_args provided in step inputs?
+            - Is the plan logically complete and executable?
+            - Do step dependencies form a valid execution order?
         """
         data = self.llm.complete_json(prompt)
         if not data or "plan" not in data:
@@ -1302,32 +1018,45 @@ class PlanAgent:
         else:
             # Fallback to default hardcoded prompt
             prompt = f"""
-            You are a meta-planner evaluating travel plans for completeness and quality.
+            You are a meta-planner evaluating candidate plans for completeness and quality.
             TASK: SELECT_BEST_PLAN
             
-            Given a Signature with requested activities and multiple candidate plans, choose the best one.
+            Given a Signature with requirements and multiple candidate plans, choose the best one.
             
             EVALUATION CRITERIA (in order of importance):
-            1. ACTIVITY COVERAGE: Does the plan include steps for ALL requested activities?
-               - Check signature.activities array
-               - Each activity should have corresponding plan steps
-               - Missing activities = incomplete plan
+            1. REQUIREMENT COVERAGE: Does the plan address ALL requirements from the signature?
+               - Check signature.activities array - each activity should have corresponding plan steps
+               - Check signature.constraints - all constraints should be respected
+               - Check signature.preferences - preferences should be considered
+               - Missing requirements = incomplete plan
             
-            2. COMPLETENESS: Does the plan form a complete round trip?
-               - Must return to original origin
-               - Day trips need round-trip flights (outbound + return)
-               - All legs in itinerary covered
+            2. COMPLETENESS: Is the plan logically complete?
+               - All necessary steps are present
+               - The plan achieves the stated goal
+               - No critical gaps in the execution sequence
             
-            3. LOGICAL SEQUENCE: Are steps in correct chronological order?
-               - Arrival → Hotel → Activities → Return Flight
+            3. LOGICAL SEQUENCE: Are steps in correct chronological and dependency order?
+               - Steps follow a logical progression
+               - Dependencies are properly established
+               - Timing constraints are respected
             
             4. EFFICIENCY: Reasonable number of steps (not too sparse, not redundant)
+               - Plan is neither overly complex nor overly simplistic
+               - Steps are appropriately granular
+            
+            5. ACTION VALIDITY: Are all steps using valid actions with correct inputs?
+               - Actions exist in the action catalog
+               - Required arguments are provided
+               - Input values are appropriate
             
             Return ONLY JSON: {{"choice_index": int, "reason": str}}
             
-            The reason should explicitly state which activities are covered/missing in the chosen plan.
+            The reason should explicitly state:
+            - Which requirements are covered/missing in the chosen plan
+            - Why this plan is better than the alternatives
+            - Any notable strengths or weaknesses
 
-            Signature (with requested activities):
+            Signature (with requirements):
             ```json
             {sig.to_text()}
             ```
@@ -1336,16 +1065,16 @@ class PlanAgent:
             ```json
             {json.dumps(activities_requested, indent=2)}
             ```
-
+            
             Candidate Plans (with step details):
             ```json
             {json.dumps(plan_details, indent=2)}
             ```
             
             IMPORTANT: 
-            - A day trip to another city needs BOTH outbound and return flights
-            - Tours, restaurants, and other activities need dedicated steps
-            - Prefer the plan that covers ALL activities over one that skips some
+            - Prefer plans that cover ALL requirements over those that skip some
+            - Consider both completeness and quality
+            - Choose the plan most likely to successfully achieve the goal
         """
         out = self.llm.complete(prompt)
         print('Candidate selection results:',out)
@@ -1594,7 +1323,7 @@ class GeneratePlan:
         
         return actions
     
-    def _load_seed_cases(self, portfolio: str, org: str, case_ring: str = "pes_cases") -> List[Dict[str, Any]]:
+    def _load_seed_cases(self, portfolio: str, org: str, case_ring: str = "pes_seed_cases") -> List[Dict[str, Any]]:
         """
         Load seed cases from database (trips/cases ring).
         Returns a list of case dictionaries with 'signature' and 'plan' keys.
@@ -1619,14 +1348,39 @@ class GeneratePlan:
             print(f'Warning: Could not load seed cases from database: {str(e)}')
         
         return cases
-            
     
+    def _load_facts(self, portfolio: str, org: str, fact_ring: str = "pes_seed_facts") -> List[Dict[str, Any]]:
+        """
+        Load facts from database (facts ring).
+        Returns a list of fact dictionaries with 'text' and 'meta' keys.
+        """
+        facts = []
+        
+        try:
+            # Get all fact records from the ring
+            response = self.DAC.get_a_b(portfolio, org, fact_ring, limit=1000)
+            if response and 'items' in response:
+                for item in response['items']:
+                    # Expect fact records to have 'text' and 'meta' fields
+                    text = item.get('text', '')
+                    meta = item.get('meta', {})
+                    
+                    if text:
+                        facts.append({
+                            'text': text,
+                            'meta': meta
+                        })
+        except Exception as e:
+            print(f'Warning: Could not load facts from database: {str(e)}')
+        
+        return facts
     
     
     def build_plan_generator(self, portfolio: str, org: str, 
                          prompt_ring: str = "pes_prompts",
                          action_ring: str = "schd_actions",
-                         case_ring: str = "pes_cases") -> PlanAgent:
+                         case_ring: str = "pes_cases",
+                         fact_ring: str = "pes_facts") -> PlanAgent:
         embedder = SimpleEmbedder()
         vdb = VectorDB(embedder)
         # Pass the AgentUtilities instance to AIResponsesLLM
@@ -1641,39 +1395,9 @@ class GeneratePlan:
         # Load actions from database
         action_catalog = self._load_actions(portfolio, org, action_ring)
         
-        # Fallback to hardcoded actions if database is empty
+        # Note: If no actions are loaded from database, action_catalog will be empty
         if not action_catalog:
-            print('Warning: No actions loaded from database, using fallback actions')
-            action_catalog = [
-                ActionSpec(
-                    key="quote_flight",
-                    description="Search and quote flights between two airports for given date and number of passengers.",
-                    required_args=["from_airport_code", "to_airport_code", "departure_date"],
-                    optional_args=["return_date", "passengers", "cabin_class", "direct_only", "leg"],
-                    success_criteria_hint="len(result) > 0 and result[0].get('flight')"
-                ),
-                ActionSpec(
-                    key="quote_hotel",
-                    description="Search business hotels in a target area and budget.",
-                    required_args=["city", "area", "check_in_date", "number_of_nights"],
-                    optional_args=["budget", "amenities"],
-                    success_criteria_hint="len(result) > 0"
-                ),
-                ActionSpec(
-                    key="rent_bike",
-                    description="Reserve bikes for business travelers or leisure.",
-                    required_args=["rider_count", "pickup_area"],
-                    optional_args=["bike_type"],
-                    success_criteria_hint="result.get('confirmed') == True"
-                ),
-                ActionSpec(
-                    key="map_route",
-                    description="Plan a walking/biking route for efficient navigation.",
-                    required_args=[],
-                    optional_args=["max_minutes", "avoid_hills"],
-                    success_criteria_hint=""
-                ),
-            ]
+            print('Warning: No actions loaded from database, action_catalog will be empty')
 
         # Load seed cases from database
         seed_cases = self._load_seed_cases(portfolio, org, case_ring)
@@ -1689,238 +1413,41 @@ class GeneratePlan:
                        text=json.dumps({"signature": signature_text, "plan": plan_data}),
                        meta=meta)
         
-        # Fallback to hardcoded seed cases if database is empty
+        # Note: If no seed cases are loaded from database, VDB will be empty
         if not seed_cases:
-            print('Warning: No seed cases loaded from database, using fallback cases')
-            # Seed Case 1: NYC business conference trip (summer, single destination)
-            case1_sig = Signature(domain="travel", goal="business conference and meetings", destination="NYC",
-                                party={"travelers":2},
-                                constraints={"budget":"mid"},
-                                preferences={"central_location":True,"wifi":True},
-                                activities=[
-                                    {"type": "conference", "description": "business conference attendance", "location": "NYC"},
-                                    {"type": "leisure", "description": "bike rental for recreation", "location": "Central Park"}
-                                ],
-                                extras={"season":"summer", "origin":"Boston", "purpose":"conference"})
-            case1_steps = [
-                asdict(PlanStep(step_id=0, title="Boston to NYC flight",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"BOS","to_airport_code":"JFK","departure_date":"2026-07-15","passengers":2},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=1)),
-                asdict(PlanStep(step_id=1, title="Find Midtown business hotel",
-                                action="quote_hotel",
-                                inputs={"city":"New York City","area":"Midtown Manhattan","budget":"mid","check_in_date":"2026-07-15","number_of_nights":5},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=2)),
-                asdict(PlanStep(step_id=2, title="Reserve bikes for leisure",
-                                action="rent_bike",
-                                inputs={"rider_count":2,"pickup_area":"Central Park"},
-                                enter_guard="True",
-                                success_criteria="result.get('confirmed') == True",
-                                depends_on=[],
-                                next_step=3)),
-                asdict(PlanStep(step_id=3, title="NYC to Boston flight",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"JFK","to_airport_code":"BOS","departure_date":"2026-07-20","passengers":2},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=None)),
-            ]
-            vdb.add(kind="case",
-                    text=json.dumps({"signature": case1_sig.to_text(), "plan": {"steps": case1_steps}}),
-                    meta={"destination": "NYC"})
+            print('Warning: No seed cases loaded from database, VDB will be empty')
 
-            # Seed Case 2: Multi-city business trip (NYC + Washington DC, winter)
-            case2_sig = Signature(domain="travel", goal="multi-city business meetings", destination="NYC,Washington DC",
-                                party={"travelers":1},
-                                constraints={"budget":"high"},
-                                preferences={"business_center":True,"airport_proximity":True},
-                                activities=[
-                                    {"type": "meeting", "description": "client meetings", "location": "NYC"},
-                                    {"type": "meeting", "description": "client meetings", "location": "Washington DC"}
-                                ],
-                                extras={"season":"winter", "origin":"Chicago", "purpose":"client_meetings"})
-            case2_steps = [
-                asdict(PlanStep(step_id=0, title="Flight from Chicago to NYC",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"ORD","to_airport_code":"JFK","departure_date":"2026-12-20","passengers":1},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=1)),
-                asdict(PlanStep(step_id=1, title="Book NYC hotel",
-                                action="quote_hotel",
-                                inputs={"city":"New York City","area":"Midtown Manhattan","budget":"high","check_in_date":"2026-12-20","number_of_nights":3},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=2)),
-                asdict(PlanStep(step_id=2, title="Flight from NYC to Washington DC",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"JFK","to_airport_code":"DCA","departure_date":"2026-12-23","passengers":1},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=3)),
-                asdict(PlanStep(step_id=3, title="Book DC hotel",
-                                action="quote_hotel",
-                                inputs={"city":"Washington DC","area":"Downtown DC","budget":"high","check_in_date":"2026-12-23","number_of_nights":4},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=4)),
-                asdict(PlanStep(step_id=4, title="Flight from Washington DC to Chicago",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"DCA","to_airport_code":"ORD","departure_date":"2026-12-27","passengers":1},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=None)),
-            ]
-            vdb.add(kind="case",
-                    text=json.dumps({"signature": case2_sig.to_text(), "plan": {"steps": case2_steps}}),
-                    meta={"destination": "NYC,Washington DC"})
-
-            # Seed Case 3: San Francisco tech conference (spring)
-            case3_sig = Signature(domain="travel", goal="tech conference and networking", destination="San Francisco",
-                                party={"travelers":1},
-                                constraints={"budget":"mid"},
-                                preferences={"tech_hub_location":True,"public_transit":True},
-                                activities=[
-                                    {"type": "conference", "description": "tech conference attendance", "location": "SOMA District"},
-                                    {"type": "leisure", "description": "bike rental for transportation", "location": "SOMA"},
-                                    {"type": "route_planning", "description": "efficient route to venue", "preferences": ["avoid_hills"]}
-                                ],
-                                extras={"season":"spring", "origin":"Seattle", "purpose":"conference"})
-            case3_steps = [
-                asdict(PlanStep(step_id=0, title="Flight from Seattle to SF",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"SEA","to_airport_code":"SFO","departure_date":"2026-04-10","passengers":1},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=1)),
-                asdict(PlanStep(step_id=1, title="Book SOMA district hotel",
-                                action="quote_hotel",
-                                inputs={"city":"San Francisco","area":"SOMA District","budget":"mid","check_in_date":"2026-04-10","number_of_nights":4},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=2)),
-                asdict(PlanStep(step_id=2, title="Plan efficient route to venue",
-                                action="map_route",
-                                inputs={"max_minutes":30,"avoid_hills":True},
-                                enter_guard="True",
-                                success_criteria="",
-                                depends_on=[],
-                                next_step=3)),
-                asdict(PlanStep(step_id=3, title="Reserve bike for transportation",
-                                action="rent_bike",
-                                inputs={"rider_count":1,"pickup_area":"SOMA"},
-                                enter_guard="True",
-                                success_criteria="result.get('confirmed') == True",
-                                depends_on=[],
-                                next_step=4)),
-                asdict(PlanStep(step_id=4, title="Flight from SF to Seattle",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"SFO","to_airport_code":"SEA","departure_date":"2026-04-14","passengers":1},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=None)),
-            ]
-            vdb.add(kind="case",
-                    text=json.dumps({"signature": case3_sig.to_text(), "plan": {"steps": case3_steps}}),
-                    meta={"destination": "San Francisco"})
-
-            # Seed Case 4: Day trip to Lima (same day return, no hotel)
-            case4_sig = Signature(domain="travel", goal="business meeting same-day return", destination="Lima",
-                                party={"travelers":3},
-                                constraints={"budget":"mid"},
-                                preferences={"quick_turnaround":True},
-                                activities=[
-                                    {"type": "meeting", "description": "client meeting", "location": "Downtown Lima Conference Center"}
-                                ],
-                                extras={"season":"all_year", "origin":"Sao Paulo", "purpose":"client_meeting", "trip_type":"day_trip", "venue":"Downtown Lima Conference Center"})
-            case4_steps = [
-                asdict(PlanStep(step_id=0, title="Sao Paulo to Lima morning flight",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"GRU","to_airport_code":"LIM","departure_date":"2026-06-15","passengers":3},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=1)),
-                asdict(PlanStep(step_id=1, title="Lima to Sao Paulo evening flight",
-                                action="quote_flight",
-                                inputs={"from_airport_code":"LIM","to_airport_code":"GRU","departure_date":"2026-06-15","passengers":3},
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[],
-                                next_step=None)),
-            ]
-            vdb.add(kind="case",
-                    text=json.dumps({"signature": case4_sig.to_text(), "plan": {"steps": case4_steps}}),
-                    meta={"destination": "Lima"})
-
-        # Facts
-        vdb.add(kind="fact",
-                text="Midtown Manhattan has many business hotels with conference facilities and excellent transit access.",
-                meta={"destination":"NYC"})
-        vdb.add(kind="fact",
-                text="In NYC winters, walking between meetings can be challenging; consider booking hotels near venues.",
-                meta={"destination":"NYC"})
-        vdb.add(kind="fact",
-                text="JFK and LaGuardia airports serve NYC; JFK is better for international and long-distance flights.",
-                meta={"destination":"NYC"})
-        vdb.add(kind="fact",
-                text="Washington DC has a well-developed Metro system connecting airports to downtown business districts.",
-                meta={"destination":"Washington DC"})
-        vdb.add(kind="fact",
-                text="San Francisco is hilly; efficient routes should avoid steep areas like Russian Hill and Nob Hill.",
-                meta={"destination":"San Francisco"})
-        vdb.add(kind="fact",
-                text="SOMA District in San Francisco is the tech hub with many conference venues and coworking spaces.",
-                meta={"destination":"San Francisco"})
-        vdb.add(kind="fact",
-                text="Lima Peru is reachable from Sao Paulo in about 5 hours; ideal for same-day business trips.",
-                meta={"destination":"Lima"})
-        vdb.add(kind="fact",
-                text="For day trips, book morning outbound and evening return flights to maximize time at destination.",
-                meta={})
-
-        # Skills (semantic hints)
-        vdb.add(kind="skill",
-                text="Hotel selection near business districts; prefer Midtown Manhattan for business travelers visiting NYC.",
-                meta={"destination":"NYC"})
-        vdb.add(kind="skill",
-                text="Bike rental can be useful for quick transportation between nearby meetings in urban areas.",
-                meta={"destination":"NYC"})
-        vdb.add(kind="skill",
-                text="Multi-city trips require connecting flights or inter-city transportation between destinations.",
-                meta={})
-        vdb.add(kind="skill",
-                text="For business travelers, prioritize central locations with good transit access and minimize travel time.",
-                meta={})
-        vdb.add(kind="skill",
-                text="Check signature.activities array for requested services like tours, restaurants, day trips. Create plan steps for each activity.",
-                meta={})
-        vdb.add(kind="skill",
-                text="Activities should be inserted between hotel check-in and departure, in chronological order based on dates and timing.",
-                meta={})
+        # Load facts from database
+        facts = self._load_facts(portfolio, org, fact_ring)
+        
+        # Add facts to VectorDB
+        for fact_data in facts:
+            text = fact_data.get('text', '')
+            kind = fact_data.get('kind', 'fact')
+            meta = fact_data.get('meta', {})
+            
+            if text:
+                vdb.add(kind=kind,
+                       text=text,
+                       meta=meta)
+        
+        # Note: If no facts are loaded from database, VDB will not have facts
+        if not facts:
+            print('Warning: No facts loaded from database, VDB will not have facts')
 
         return PlanAgent(vdb=vdb, llm=llm, action_catalog=action_catalog, prompts=prompts)
 
-
-    
-    
     
     def run(self, payload):
+        
+        '''
+        Payload
+        {
+            "portfolio":"",
+            "org":"",
+            "message":""
+        }
+        '''
         # Initialize a new request context
         function = 'run > generate_plan'
         context = RequestContext()
@@ -1938,7 +1465,9 @@ class GeneratePlan:
         try:
             self._set_context(context)
             
-            # Create AgentUtilities with proper config
+            # Create AgentUtilities with throw away entity_type, entity_id and thread 
+            # The reason is that this class doesn't write to the chat entity directly
+            # We are only initializing AGU because we need access to its LLM function
             self.AGU = AgentUtilities(
                 self.config,
                 context.portfolio,
@@ -1977,28 +1506,3 @@ class GeneratePlan:
             print(f'Error during execution: {str(e)}')
             return {'success': False, 'function': function, 'input': payload, 'output': f'ERROR:@generate_plan/run: {str(e)}'}
 
-# Test block
-if __name__ == '__main__':
-    # Creating an instance
-    handler = GeneratePlan()
-    '''req = {
-        "portfolio":"12345",
-        "org":"56789",
-        "message":"A team of four executives need to fly to Lima Peru from Sao Paulo in the morning and come back the same day."
-    }'''
-    
-    req = {
-        "portfolio":"12345",
-        "org":"56789",
-        "message":"A team of three executives are going to New York City from Rio de Janeiro on November 15 they are staying for 4 nights and then go to Chicago for 3 nights. Then fly back to Rio"
-    }
-    
-    req_x = {
-        "portfolio":"12345",
-        "org":"56789",
-        "message":"A group of 42 people are coming to NYC in September 17 from Milan Italy for four nights, they want a city tour, a dinner in a good restaurant. Then they want to have a day trip to Philadelphia. The inbound flight arrives at 2:30PM. "
-    }
-    
-    out = handler.run(req)
-    print(json.dumps(out, indent=2, cls=DecimalEncoder))
-    

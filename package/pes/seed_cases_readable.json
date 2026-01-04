@@ -1,0 +1,435 @@
+[
+  {
+    "id": "seed_case_001",
+    "signature": {
+      "activities": [
+        {
+          "description": "business conference attendance",
+          "location": "NYC",
+          "type": "conference"
+        },
+        {
+          "description": "bike rental for recreation",
+          "location": "Central Park",
+          "type": "leisure"
+        }
+      ],
+      "constraints": {
+        "budget": "mid"
+      },
+      "dates": null,
+      "destination": "NYC",
+      "domain": "travel",
+      "extras": {
+        "origin": "Boston",
+        "purpose": "conference",
+        "season": "summer"
+      },
+      "goal": "business conference and meetings",
+      "party": {
+        "travelers": 2
+      },
+      "preferences": {
+        "central_location": true,
+        "wifi": true
+      }
+    },
+    "plan": {
+      "steps": [
+        {
+          "step_id": 0,
+          "title": "Boston to NYC flight",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "BOS",
+            "to_airport_code": "JFK",
+            "departure_date": "2026-07-15",
+            "passengers": 2
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 1
+        },
+        {
+          "step_id": 1,
+          "title": "Find Midtown business hotel",
+          "action": "quote_hotel",
+          "inputs": {
+            "city": "New York City",
+            "area": "Midtown Manhattan",
+            "budget": "mid",
+            "check_in_date": "2026-07-15",
+            "number_of_nights": 5
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 2
+        },
+        {
+          "step_id": 2,
+          "title": "Reserve bikes for leisure",
+          "action": "rent_bike",
+          "inputs": {
+            "rider_count": 2,
+            "pickup_area": "Central Park"
+          },
+          "enter_guard": "True",
+          "success_criteria": "result.get('confirmed') == True",
+          "depends_on": [],
+          "next_step": 3
+        },
+        {
+          "step_id": 3,
+          "title": "NYC to Boston flight",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "JFK",
+            "to_airport_code": "BOS",
+            "departure_date": "2026-07-20",
+            "passengers": 2
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": null
+        }
+      ]
+    },
+    "meta": {
+      "destination": "NYC",
+      "case_type": "single_destination",
+      "season": "summer",
+      "purpose": "conference"
+    },
+    "comment": "Seed Case 1: NYC business conference trip (summer, single destination)",
+    "notes": "The 'text' field contains a JSON string with 'signature' (JSON string) and 'plan' (object)"
+  },
+  {
+    "id": "seed_case_002",
+    "signature": {
+      "activities": [
+        {
+          "description": "client meetings",
+          "location": "NYC",
+          "type": "meeting"
+        },
+        {
+          "description": "client meetings",
+          "location": "Washington DC",
+          "type": "meeting"
+        }
+      ],
+      "constraints": {
+        "budget": "high"
+      },
+      "dates": null,
+      "destination": "NYC,Washington DC",
+      "domain": "travel",
+      "extras": {
+        "origin": "Chicago",
+        "purpose": "client_meetings",
+        "season": "winter"
+      },
+      "goal": "multi-city business meetings",
+      "party": {
+        "travelers": 1
+      },
+      "preferences": {
+        "airport_proximity": true,
+        "business_center": true
+      }
+    },
+    "plan": {
+      "steps": [
+        {
+          "step_id": 0,
+          "title": "Flight from Chicago to NYC",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "ORD",
+            "to_airport_code": "JFK",
+            "departure_date": "2026-12-20",
+            "passengers": 1
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 1
+        },
+        {
+          "step_id": 1,
+          "title": "Book NYC hotel",
+          "action": "quote_hotel",
+          "inputs": {
+            "city": "New York City",
+            "area": "Midtown Manhattan",
+            "budget": "high",
+            "check_in_date": "2026-12-20",
+            "number_of_nights": 3
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 2
+        },
+        {
+          "step_id": 2,
+          "title": "Flight from NYC to Washington DC",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "JFK",
+            "to_airport_code": "DCA",
+            "departure_date": "2026-12-23",
+            "passengers": 1
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 3
+        },
+        {
+          "step_id": 3,
+          "title": "Book DC hotel",
+          "action": "quote_hotel",
+          "inputs": {
+            "city": "Washington DC",
+            "area": "Downtown DC",
+            "budget": "high",
+            "check_in_date": "2026-12-23",
+            "number_of_nights": 4
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 4
+        },
+        {
+          "step_id": 4,
+          "title": "Flight from Washington DC to Chicago",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "DCA",
+            "to_airport_code": "ORD",
+            "departure_date": "2026-12-27",
+            "passengers": 1
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": null
+        }
+      ]
+    },
+    "meta": {
+      "destination": "NYC,Washington DC",
+      "case_type": "multi_city",
+      "season": "winter",
+      "purpose": "client_meetings"
+    },
+    "comment": "Seed Case 2: Multi-city business trip (NYC + Washington DC, winter)",
+    "notes": ""
+  },
+  {
+    "id": "seed_case_003",
+    "signature": {
+      "activities": [
+        {
+          "description": "tech conference attendance",
+          "location": "SOMA District",
+          "type": "conference"
+        },
+        {
+          "description": "bike rental for transportation",
+          "location": "SOMA",
+          "type": "leisure"
+        },
+        {
+          "description": "efficient route to venue",
+          "preferences": [
+            "avoid_hills"
+          ],
+          "type": "route_planning"
+        }
+      ],
+      "constraints": {
+        "budget": "mid"
+      },
+      "dates": null,
+      "destination": "San Francisco",
+      "domain": "travel",
+      "extras": {
+        "origin": "Seattle",
+        "purpose": "conference",
+        "season": "spring"
+      },
+      "goal": "tech conference and networking",
+      "party": {
+        "travelers": 1
+      },
+      "preferences": {
+        "public_transit": true,
+        "tech_hub_location": true
+      }
+    },
+    "plan": {
+      "steps": [
+        {
+          "step_id": 0,
+          "title": "Flight from Seattle to SF",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "SEA",
+            "to_airport_code": "SFO",
+            "departure_date": "2026-04-10",
+            "passengers": 1
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 1
+        },
+        {
+          "step_id": 1,
+          "title": "Book SOMA district hotel",
+          "action": "quote_hotel",
+          "inputs": {
+            "city": "San Francisco",
+            "area": "SOMA District",
+            "budget": "mid",
+            "check_in_date": "2026-04-10",
+            "number_of_nights": 4
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 2
+        },
+        {
+          "step_id": 2,
+          "title": "Plan efficient route to venue",
+          "action": "map_route",
+          "inputs": {
+            "max_minutes": 30,
+            "avoid_hills": true
+          },
+          "enter_guard": "True",
+          "success_criteria": "",
+          "depends_on": [],
+          "next_step": 3
+        },
+        {
+          "step_id": 3,
+          "title": "Reserve bike for transportation",
+          "action": "rent_bike",
+          "inputs": {
+            "rider_count": 1,
+            "pickup_area": "SOMA"
+          },
+          "enter_guard": "True",
+          "success_criteria": "result.get('confirmed') == True",
+          "depends_on": [],
+          "next_step": 4
+        },
+        {
+          "step_id": 4,
+          "title": "Flight from SF to Seattle",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "SFO",
+            "to_airport_code": "SEA",
+            "departure_date": "2026-04-14",
+            "passengers": 1
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": null
+        }
+      ]
+    },
+    "meta": {
+      "destination": "San Francisco",
+      "case_type": "single_destination",
+      "season": "spring",
+      "purpose": "conference"
+    },
+    "comment": "Seed Case 3: San Francisco tech conference (spring)",
+    "notes": ""
+  },
+  {
+    "id": "seed_case_004",
+    "signature": {
+      "activities": [
+        {
+          "description": "client meeting",
+          "location": "Downtown Lima Conference Center",
+          "type": "meeting"
+        }
+      ],
+      "constraints": {
+        "budget": "mid"
+      },
+      "dates": null,
+      "destination": "Lima",
+      "domain": "travel",
+      "extras": {
+        "origin": "Sao Paulo",
+        "purpose": "client_meeting",
+        "season": "all_year",
+        "trip_type": "day_trip",
+        "venue": "Downtown Lima Conference Center"
+      },
+      "goal": "business meeting same-day return",
+      "party": {
+        "travelers": 3
+      },
+      "preferences": {
+        "quick_turnaround": true
+      }
+    },
+    "plan": {
+      "steps": [
+        {
+          "step_id": 0,
+          "title": "Sao Paulo to Lima morning flight",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "GRU",
+            "to_airport_code": "LIM",
+            "departure_date": "2026-06-15",
+            "passengers": 3
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": 1
+        },
+        {
+          "step_id": 1,
+          "title": "Lima to Sao Paulo evening flight",
+          "action": "quote_flight",
+          "inputs": {
+            "from_airport_code": "LIM",
+            "to_airport_code": "GRU",
+            "departure_date": "2026-06-15",
+            "passengers": 3
+          },
+          "enter_guard": "True",
+          "success_criteria": "len(result) > 0",
+          "depends_on": [],
+          "next_step": null
+        }
+      ]
+    },
+    "meta": {
+      "destination": "Lima",
+      "case_type": "day_trip",
+      "season": "all_year",
+      "purpose": "client_meeting"
+    },
+    "comment": "Seed Case 4: Day trip to Lima (same day return, no hotel)",
+    "notes": ""
+  }
+]

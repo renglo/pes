@@ -6,8 +6,16 @@ from renglo.schd.schd_controller import SchdController
 from renglo.agent.agent_utilities import AgentUtilities
 from renglo.common import load_config
 
-from .execute_plan import ExecutePlan
-from .generate_plan import GeneratePlan
+# Improved Generate and Execute Plan
+from pes.handlers.execute_plan import ExecutePlan
+from pes.handlers.generate_plan import GeneratePlan
+
+# Legacy Generate and Execute Plan
+#from .execute_plan import ExecutePlan
+#from .generate_plan import GeneratePlan
+
+import importlib.resources
+import yaml
 
 
 from openai import OpenAI
@@ -33,9 +41,7 @@ class DecimalEncoder(json.JSONEncoder):
         return super(DecimalEncoder, self).default(obj)
 
 
-'''
-Hierarchical Agent > generate_plan > execute_plan > specialist
-'''
+
 
 
 @dataclass
@@ -74,13 +80,14 @@ class DecimalEncoder(json.JSONEncoder):
         return super(DecimalEncoder, self).default(obj)
 
 class HierarchicalAgent:
-    def __init__(self):
+    def __init__(self,prompts):
         
         self.config = load_config()
         self.DAC = DataController(config=self.config)
         self.DCC = DocsController(config=self.config)
         self.CHC = ChatController(config=self.config)
         self.SHC = SchdController(config=self.config)
+        self.prompts = prompts
         
         # AgentUtilities will be initialized in the run function
         self.AGU = None
@@ -118,6 +125,53 @@ class HierarchicalAgent:
                 context.thread
             ) 
         return self.AGU
+    
+    # NOT USED, SAMPLE FUNCTION TO IMPLEMENT IN CALLING MODULE TO RETRIEVE PROMPTS FROM YAML FILE
+    def _load_prompts_from_files(self) -> Dict[str, str]:
+        """
+        Load prompts from prompts.yaml file in the <calling_module>.prompts package directory.
+        Returns a dictionary with keys: 'to_signature', 'adapt_plan', 'compose_plan', 'select_best_plan'
+        Uses importlib.resources for proper package resource loading.
+        
+        This function needs to be implemented in the calling module
+        Replace <calling_module> with the real name of the module 
+        """
+        
+        prompts = {
+            'to_signature': '',
+            'adapt_plan': '',
+            'compose_plan': '',
+            'select_best_plan': ''
+        }
+        
+        try:
+            # Use importlib.resources to access package data files
+            # This works whether the package is installed or run from source
+            prompts_package = importlib.resources.files('<calling_module>.prompts')
+            prompts_yaml_file = prompts_package / 'pes_prompts.yaml'
+            
+            # Read and parse YAML file
+            yaml_content = prompts_yaml_file.read_text(encoding='utf-8')
+            data = yaml.safe_load(yaml_content)
+            
+            # Extract prompts from YAML structure
+            if data and 'prompts' in data:
+                loaded_prompts = data['prompts']
+                for key in prompts.keys():
+                    if key in loaded_prompts:
+                        prompts[key] = loaded_prompts[key]
+                    else:
+                        print(f'Warning: Prompt "{key}" not found in prompts.yaml')
+            else:
+                print('Warning: Invalid prompts.yaml structure - missing "prompts" key')
+        except FileNotFoundError:
+            print('Warning: prompts.yaml file not found in <calling_module>.prompts package')
+        except yaml.YAMLError as e:
+            print(f'Warning: Error parsing prompts.yaml: {str(e)}')
+        except Exception as e:
+            print(f'Warning: Could not load prompts.yaml: {str(e)}')
+        
+        return prompts
         
 
 
@@ -481,25 +535,12 @@ class HierarchicalAgent:
         
         '''
         
-        plan/plan_step/action/action_step
-        1212341/2/search_flight/3
-        
-        Plan of action
-        
-        1. Create pre_planner function that checks if the payload comes with a continuation id. If that is the case we'll skip the planner and resume plan execution
-        2. Insert Planner. Replace pre_processing function for Planner function
-        3. Expose the Actions to the planner for it to assemble the plan (Actions as high level tools)
-        4. Store Plan in DB
-        5. If plan already exists run de executor. 
-        6. Pull plan document from DB
-        7. Resume execution wherever it left with the help of the continuity id. If no c_id, start the plan from the beginning
-        
-            RESUME RULES
+            CONTINUITY ROUTER RULES
             If the c_id shows 
-            [ p/-/-/- ] Resume from plan_step 0 
-            [ p/n/-/- ] Resume from plan_step n
-            [ p/n/m/- ] Resume from plan_step n , action_step m
-            [ p/m/m/q ] Resume from plan_step n , action_step m , tool_step q 
+            [ p:-:-:- ] Resume from plan_step 0 
+            [ p:n:-:- ] Resume from plan_step n
+            [ p:n:m:- ] Resume from plan_step n , action_step m
+            [ p:m:m:q ] Resume from plan_step n , action_step m , tool_step q 
             
         8. Loops
         
@@ -513,16 +554,13 @@ class HierarchicalAgent:
                 COS > The Tool goal is achieved
                 ENGINE > Logic based loop to retry mechanically if error arises.
         
-        
-        
         '''
         
         # Initialize a new request context 
-        action = 'run > hierarchical_agents'
+        action = 'run > Hierarchical Agent'
         print(f'Running: {action}')
         print(f'Payload: {payload}')  
-        
-        
+
            
         try:
             
@@ -586,18 +624,13 @@ class HierarchicalAgent:
                 connection_id = context.connection_id
                 )
                 
-            
-            
+ 
             # Set the initial context for this turn
             print('Setting initial context ...')
             self._set_context(context)
-            
-            
-                
-            
-            results = []
            
-        
+            results = []
+
             
             # Step 0: Create thread/message document
             print('Creating document for this turn ...')
@@ -644,12 +677,17 @@ class HierarchicalAgent:
             tool_step = response_1.get('output', {}).get('tool_step', 0)
             
             
+            # PLAN GENERATION
+            
             if next_action == 'generate_plan':
                 pr = 'Initializing the plan generator...'
                 print(pr)
                 self.AGU.print_chat(pr,'text', connection_id=context.connection_id)
                 
-                generator = GeneratePlan()
+                # Load prompts from text files
+                prompts = self.prompts
+                
+                generator = GeneratePlan(prompts=prompts)
                 
                 req = {
                     "portfolio":context.portfolio,
@@ -673,7 +711,9 @@ class HierarchicalAgent:
                 m = { "role": "assistant", "content":{"plan_id":plan_id}}  
                 self.AGU.save_chat(m)
                    
-                
+            
+            # PLAN EXECUTION
+               
             # We pass the plan_id and not the plan itself. Executor will retrieve it from workspace
             pr = f'Calling the executor for plan:{plan_id}, plan_step:{plan_step}, action_step:{action_step}, tool_step:{tool_step}'
             print(pr)
@@ -689,7 +729,7 @@ class HierarchicalAgent:
             elif next_action == 'resume_tool':
                 response_1a = self.run_plan_action_tool(plan_id,plan_step,action_step,tool_step)
                 
-            results.append(response_1)
+            results.append(response_1a)
                 
             execution_results = json.dumps(response_1a, indent=2, cls=DecimalEncoder)
             pr = f'Execution output: {execution_results}'

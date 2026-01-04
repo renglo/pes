@@ -1,0 +1,84 @@
+{
+  "_id": "8b7a2d9c-2f4b-4f9e-9b3c-acb23abc85921",
+  "added": "2025-01-27T00:00:00.000000",
+  "blueprint_origin": "",
+  "description": "Facts for plan generation system - contextual information used to inform plan adaptation",
+  "fields": [
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "The group this case belongs to",
+      "label": "Case group",
+      "layer": "0",
+      "multilingual": false,
+      "name": "case_group",
+      "order": "1",
+      "required": true,
+      "semantic": "isd:case",
+      "source": "",
+      "type": "string",
+      "widget": "text"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "The kind of fact",
+      "label": "Kind",
+      "layer": "0",
+      "multilingual": false,
+      "name": "kind",
+      "order": "2",
+      "required": true,
+      "semantic": "isd:kind",
+      "source": "",
+      "type": "string",
+      "widget": "text"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "The fact text - contextual information that helps inform plan generation",
+      "label": "Text",
+      "layer": "0",
+      "multilingual": false,
+      "name": "text",
+      "order": "3",
+      "required": true,
+      "semantic": "isd:text",
+      "source": "",
+      "type": "string",
+      "widget": "text"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "Metadata object for filtering and searching (destination, domain, category, etc.)",
+      "label": "Meta",
+      "layer": "1",
+      "multilingual": false,
+      "name": "meta",
+      "order": "4",
+      "required": false,
+      "semantic": "isd:metadata",
+      "source": "",
+      "type": "object",
+      "widget": "json"
+    }
+  ],
+  "handle": "pes",
+  "indexes": {
+    "path": [
+      "case_group",
+      "kind"
+    ]
+  },
+  "irn": "irn:blueprint:irma:pes_seed_facts",
+  "label": "Facts",
+  "license": "CC BY",
+  "name": "pes_seed_facts",
+  "public": true,
+  "status": "final",
+  "uri": "https://pes.renglo.com/_blueprint/irma/pes_seed_facts/1.0.0",
+  "version": "1.0.0"
+}
+

@@ -1,0 +1,113 @@
+{
+  "_id": "8b7a2d9c-2f4b-4f9e-9b3c-12bab381aba34",
+  "added": "2026-01-02T00:00:00.000000",
+  "blueprint_origin": "",
+  "description": "Seed cases for plan generation system - example cases used for case-based reasoning",
+  "fields": [
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "The group this case belongs to",
+      "label": "Case group",
+      "layer": "0",
+      "multilingual": false,
+      "name": "case_group",
+      "order": "1",
+      "required": true,
+      "semantic": "isd:case",
+      "source": "",
+      "type": "string",
+      "widget": "text"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "Signature object containing domain, goal, destination, party, dates, constraints, preferences, activities, and extras",
+      "label": "Signature",
+      "layer": "1",
+      "multilingual": false,
+      "name": "signature",
+      "order": "2",
+      "required": false,
+      "semantic": "isd:signature",
+      "source": "",
+      "type": "object",
+      "widget": "json"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "Plan object containing steps array with step_id, title, action, inputs, enter_guard, success_criteria, depends_on, and next_step",
+      "label": "Plan",
+      "layer": "1",
+      "multilingual": false,
+      "name": "plan",
+      "order": "3",
+      "required": false,
+      "semantic": "isd:plan",
+      "source": "",
+      "type": "object",
+      "widget": "json"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "Metadata object for filtering and searching (destination, case_type, season, purpose)",
+      "label": "Meta",
+      "layer": "1",
+      "multilingual": false,
+      "name": "meta",
+      "order": "4",
+      "required": false,
+      "semantic": "isd:metadata",
+      "source": "",
+      "type": "object",
+      "widget": "json"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "Brief description of the case",
+      "label": "Description",
+      "layer": "0",
+      "multilingual": false,
+      "name": "description",
+      "order": "5",
+      "required": false,
+      "semantic": "isd:comment",
+      "source": "",
+      "type": "string",
+      "widget": "text"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "Additional notes about the case structure or usage",
+      "label": "Notes",
+      "layer": "1",
+      "multilingual": false,
+      "name": "notes",
+      "order": "6",
+      "required": false,
+      "semantic": "isd:notes",
+      "source": "",
+      "type": "string",
+      "widget": "textarea"
+    }
+  ],
+  "handle": "pes",
+  "indexes": {
+    "path": [
+      "case_group"
+    ]
+  },
+  "irn": "irn:blueprint:irma:pes_seed_cases",
+  "label": "Seed Cases",
+  "license": "CC BY",
+  "name": "pes_seed_cases",
+  "public": true,
+  "status": "final",
+  "uri": "https://pes.renglo.com/_blueprint/irma/pes_seed_cases/1.0.0",
+  "version": "1.0.0"
+}
+
