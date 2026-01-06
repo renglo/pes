@@ -28,6 +28,7 @@ class RequestContext:
     org: str = ''
     search_results: Dict[str, Any] = field(default_factory=dict)
     query_params: Dict[str, Any] = field(default_factory=dict)
+    case_group: str = ''
     
     
 
@@ -1217,7 +1218,7 @@ class GeneratePlan:
             setattr(context, key, value)
         self._set_context(context)
     
-    def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts") -> Dict[str, str]:
+    def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
         Returns a dictionary with keys: 'to_signature', 'adapt_plan', 'compose_plan', 'select_best_plan'
@@ -1230,27 +1231,47 @@ class GeneratePlan:
         }
         
         try:
-            # Get all prompt records from the ring
-            response = self.DAC.get_a_b(portfolio, org, prompt_ring, limit=1000)
+            # Get all prompt records for the case_group
+            if not case_group:
+                raise Exception('No case group')
+            
+            query = {
+                'portfolio': portfolio,
+                'org': org,
+                'ring': prompt_ring,
+                'value': case_group,
+                'limit': 99,
+                'operator': 'begins_with',
+                'lastkey': None,
+                'sort': 'asc'
+            }
+            response = self.DAC.get_a_b_query(query)
+            
+            #response = self.DAC.get_a_b(portfolio, org, prompt_ring, limit=1000)
             if response and 'items' in response:
                 for item in response['items']:
+                    # Get the key field (exact match from database)
                     key = item.get('key', '').lower()
-                    # Try different possible field names for prompt text
-                    prompt_text = item.get('prompt', '') or item.get('text', '') or item.get('content', '')
                     
-                    # Map keys to prompt types
-                    if 'to_signature' in key or 'signature' in key:
+                    # Get prompt text from 'prompt' field only
+                    prompt_text = item.get('prompt', '')
+                    
+                    # Strip leading whitespace (database responses have leading spaces)
+                    if prompt_text:
+                        prompt_text = prompt_text.lstrip()
+                    
+                    # Map keys to prompt types using exact match only
+                    if key == 'to_signature':
                         prompts['to_signature'] = prompt_text
-                    elif 'adapt_plan' in key or 'adapt' in key:
+                    elif key == 'adapt_plan':
                         prompts['adapt_plan'] = prompt_text
-                    elif 'compose_plan' in key or 'compose' in key:
+                    elif key == 'compose_plan':
                         prompts['compose_plan'] = prompt_text
-                    elif 'select_best_plan' in key or 'select' in key:
+                    elif key == 'select_best_plan':
                         prompts['select_best_plan'] = prompt_text
         except Exception as e:
             print(f'Warning: Could not load prompts from database: {str(e)}')
-            import traceback
-            traceback.print_exc()
+            
         
         return prompts
     
@@ -1318,12 +1339,11 @@ class GeneratePlan:
                         ))
         except Exception as e:
             print(f'Warning: Could not load actions from database: {str(e)}')
-            import traceback
-            traceback.print_exc()
+            
         
         return actions
     
-    def _load_seed_cases(self, portfolio: str, org: str, case_ring: str = "pes_seed_cases") -> List[Dict[str, Any]]:
+    def _load_seed_cases(self, portfolio: str, org: str, case_ring: str = "pes_seed_cases", case_group: str = None) -> List[Dict[str, Any]]:
         """
         Load seed cases from database (trips/cases ring).
         Returns a list of case dictionaries with 'signature' and 'plan' keys.
@@ -1332,7 +1352,20 @@ class GeneratePlan:
         
         try:
             # Get all case records from the ring
-            response = self.DAC.get_a_b(portfolio, org, case_ring, limit=1000)
+            if not case_group:
+                raise Exception('No case group')
+            
+            query = {
+                'portfolio': portfolio,
+                'org': org,
+                'ring': case_ring,
+                'value': case_group,
+                'limit': 99,
+                'operator': 'begins_with',
+                'lastkey': None,
+                'sort': 'asc'
+            }
+            response = self.DAC.get_a_b_query(query)
             if response and 'items' in response:
                 for item in response['items']:
                     # Expect case records to have 'signature' and 'plan' fields
@@ -1349,7 +1382,7 @@ class GeneratePlan:
         
         return cases
     
-    def _load_facts(self, portfolio: str, org: str, fact_ring: str = "pes_seed_facts") -> List[Dict[str, Any]]:
+    def _load_facts(self, portfolio: str, org: str, fact_ring: str = "pes_seed_facts", case_group: str = None) -> List[Dict[str, Any]]:
         """
         Load facts from database (facts ring).
         Returns a list of fact dictionaries with 'text' and 'meta' keys.
@@ -1358,7 +1391,20 @@ class GeneratePlan:
         
         try:
             # Get all fact records from the ring
-            response = self.DAC.get_a_b(portfolio, org, fact_ring, limit=1000)
+            if not case_group:
+                raise Exception('No case group')
+            
+            query = {
+                'portfolio': portfolio,
+                'org': org,
+                'ring': fact_ring,
+                'value': case_group,
+                'limit': 99,
+                'operator': 'begins_with',
+                'lastkey': None,
+                'sort': 'asc'
+            }
+            response = self.DAC.get_a_b_query(query)
             if response and 'items' in response:
                 for item in response['items']:
                     # Expect fact records to have 'text' and 'meta' fields
@@ -1386,11 +1432,15 @@ class GeneratePlan:
         # Pass the AgentUtilities instance to AIResponsesLLM
         llm = AIResponsesLLM(self.AGU)
 
+        # Get case_group from context
+        context = self._get_context()
+        case_group = context.case_group if context else None
+        
         # Use prompts from initialization if available, otherwise load from database
         if self.prompts:
             prompts = self.prompts
         else:
-            prompts = self._load_prompts(portfolio, org, prompt_ring)
+            prompts = self._load_prompts(portfolio, org, prompt_ring, case_group=case_group)
         
         # Load actions from database
         action_catalog = self._load_actions(portfolio, org, action_ring)
@@ -1400,7 +1450,7 @@ class GeneratePlan:
             print('Warning: No actions loaded from database, action_catalog will be empty')
 
         # Load seed cases from database
-        seed_cases = self._load_seed_cases(portfolio, org, case_ring)
+        seed_cases = self._load_seed_cases(portfolio, org, case_ring, case_group=case_group)
         
         # Add seed cases to VectorDB
         for case_data in seed_cases:
@@ -1418,7 +1468,7 @@ class GeneratePlan:
             print('Warning: No seed cases loaded from database, VDB will be empty')
 
         # Load facts from database
-        facts = self._load_facts(portfolio, org, fact_ring)
+        facts = self._load_facts(portfolio, org, fact_ring, case_group=case_group)
         
         # Add facts to VectorDB
         for fact_data in facts:
@@ -1462,6 +1512,11 @@ class GeneratePlan:
         else:
             return {'success':False,'function':function,'input':payload,'output':'No org provided'}
         
+        if 'case_group' in payload:
+            context.case_group = payload['case_group']
+        else:
+            return {'success':False,'function':function,'input':payload,'output':'No case group provided'}
+        
         try:
             self._set_context(context)
             
@@ -1475,8 +1530,8 @@ class GeneratePlan:
                 'some_entity_type',
                 'some_entity_id',
                 'some_thread'
-            )
-            
+            ) 
+
             
             results = []
             print('Initializing PES>GeneratePlan')

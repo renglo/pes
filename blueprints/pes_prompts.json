@@ -1,0 +1,69 @@
+{
+  "_id": "8b7a2d9c-2f4b-4f9e-9b3c-abc59281bab45",
+  "added": "2026-01-06T00:00:00.000000",
+  "blueprint_origin": "",
+  "description": "Prompts for the PES Agent",
+  "fields": [
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "The group this case belongs to",
+      "label": "Case group",
+      "layer": "0",
+      "multilingual": false,
+      "name": "case_group",
+      "order": "1",
+      "required": true,
+      "semantic": "isd:case",
+      "source": "",
+      "type": "string",
+      "widget": "text"
+    },
+    {
+        "cardinality": "single",
+        "default": "",
+        "hint": "The index is the combination of the case_group and the key",
+        "label": "Prompt key",
+        "layer": "0",
+        "multilingual": false,
+        "name": "key",
+        "order": "2",
+        "required": true,
+        "semantic": "isd:key",
+        "source": "",
+        "type": "string",
+        "widget": "text"
+    },
+    {
+      "cardinality": "single",
+      "default": "",
+      "hint": "Prompt content",
+      "label": "Prompt",
+      "layer": "1",
+      "multilingual": false,
+      "name": "prompt",
+      "order": "3",
+      "required": false,
+      "semantic": "isd:prompt",
+      "source": "",
+      "type": "string",
+      "widget": "textarea"
+    }
+  ],
+  "handle": "pes",
+  "indexes": {
+    "path": [
+      "case_group",
+      "key"
+    ]
+  },
+  "irn": "irn:blueprint:irma:pes_prompts",
+  "label": "PES Prompts",
+  "license": "CC BY",
+  "name": "pes_prompts",
+  "public": true,
+  "status": "final",
+  "uri": "https://pes.renglo.com/_blueprint/irma/pes_prompts/1.0.0",
+  "version": "1.0.0"
+}
+
