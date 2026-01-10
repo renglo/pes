@@ -202,7 +202,7 @@ class ExecutePlan:
         except Exception as e:
             pr = f"🤖❌ @_call_specialist:{e}"
             print(pr)
-            self.AGU.print_chat(pr, "text")
+            self.AGU.print_chat(pr, "error")
 
             return {
                 "success": False,
@@ -364,7 +364,7 @@ class ExecutePlan:
 
                 pr = f"@ step {step_id}:{step_title}"
                 print(pr)
-                self.AGU.print_chat(pr, "text")
+                self.AGU.print_chat(pr, "transient")
                 
                 if loop > 1:
                     # If this is not the initial loop, the state machine will be stale.
@@ -383,19 +383,19 @@ class ExecutePlan:
                     if step_id != continuity["plan_step"]:
                         pr = "The continuity id is pointing to a completed or non existing step. Proceeding to the active step."
                         print(pr)
-                        self.AGU.print_chat(pr, "text")
+                        self.AGU.print_chat(pr, "transient")
                         continuity["plan_step"] = step_id
                     else:
                         pr = "The continuity id is pointing to a valid step."
                         print(pr)
-                        self.AGU.print_chat(pr, "text")
+                        self.AGU.print_chat(pr, "transient")
                         
                 
                 # Ensure step_state exists, break if it doesn't
                 if step_id not in step_states_by_id:
                     pr = f"⚠️ Step {step_id} not found in step_states_by_id"
                     print(pr)
-                    self.AGU.print_chat(pr, "text")
+                    self.AGU.print_chat(pr, "transient")
                     raise KeyError(f"Step ID '{step_id}' not found in State Machine")
                 
                 
@@ -475,7 +475,7 @@ class ExecutePlan:
                     # 3) Call Action
                     pr = f'Calling action:{step["action"]}'
                     print(pr)
-                    self.AGU.print_chat(pr, "text")
+                    self.AGU.print_chat(pr, "transient")
 
                     specialist_payload = step.copy()
                     specialist_payload["plan_id"] = plan_id
@@ -550,7 +550,7 @@ class ExecutePlan:
             # Determine overall status
             pr = f"The execution loop has been suspended. Waiting for further action"
             print(pr)
-            #self.AGU.print_chat(pr, "text")
+            #self.AGU.print_chat(pr, "transient")
 
             '''p = {}
             p["plan_id"] = plan_id
@@ -580,7 +580,7 @@ class ExecutePlan:
 
             pr = f"🤖❌ @execute_plan/run:{e}"
             print(pr)
-            self.AGU.print_chat(pr, "text")
+            self.AGU.print_chat(pr, "error")
 
             return {
                 "success": False,

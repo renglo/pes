@@ -3,6 +3,7 @@ pyproject.toml
 setup.py
 pes/__init__.py
 pes/handlers/__init__.py
+pes/handlers/commit_plan.py
 pes/handlers/execute_plan.py
 pes/handlers/generate_plan.py
 pes/handlers/hierarchical_agent.py
