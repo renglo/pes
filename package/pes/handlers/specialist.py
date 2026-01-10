@@ -107,7 +107,7 @@ class Specialist:
     def interpret(self,no_tools=False,tool_result=False):
         
         action = 'interpret'
-        self.AGU.print_chat('Interpreting message...', 'text', connection_id=self._get_context().connection_id)
+        self.AGU.print_chat('Interpreting message...', 'transient')
         print('interpret')
         
         try:
@@ -141,7 +141,7 @@ class Specialist:
                 step_number = int(continuity["plan_step"])+1
                 intro_msg = {'role':'assistant','content':f'Initiating step {step_number}. {current_desire} with the following parameters: {inputs}'}
                 c_id = f'irn:c_id:{continuity["plan_id"]}:{continuity["plan_step"]}'
-                self.AGU.save_chat(intro_msg, connection_id=self._get_context().connection_id, next = c_id) 
+                self.AGU.save_chat(intro_msg, next = c_id) 
                 #message_list['output'].append({'_type':'text','_next':c_id,'_out':intro_msg})
                 message_list['output'].append(intro_msg)
             
@@ -364,7 +364,7 @@ class Specialist:
                         nonce = random.randint(100000, 999999)
                         tool_step = '4' # 4  = EXECUTION_REQUEST      # tool execution has been requested by agent
                         c_id = f'{c_id_pre}:{selected_tool}:{tool_step}:{nonce}' 
-                        self.AGU.save_chat(validated_result, connection_id=self._get_context().connection_id, next = c_id)           
+                        self.AGU.save_chat(validated_result, next = c_id)           
                          
                         log_entry = {
                             "plan_id":continuity["plan_id"],
@@ -385,7 +385,7 @@ class Specialist:
                         tool_step = 3 # 3  = WAITING_HUMAN   waiting for human confirmation / input
                         consent = self.consent_form(validated_result)
                         c_id = f'{c_id_pre}:{selected_tool}:{tool_step}:{consent["nonce"]}' 
-                        self.AGU.save_chat(consent['message'], msg_type='consent', connection_id=self._get_context().connection_id, next = c_id) 
+                        self.AGU.save_chat(consent['message'], msg_type='consent', next = c_id) 
                         
                         validated_result = consent['message'] # Replacing original message with consent message.         
                         
@@ -410,7 +410,7 @@ class Specialist:
                         print(f'Interpret() >> The agent has interpreted the tool error:{validated_result}')
                         msg = validated_result.get('content')
                         
-                        self.AGU.save_chat(validated_result, connection_id=self._get_context().connection_id)
+                        self.AGU.save_chat(validated_result)
                             
                         log_entry = {
                                 "plan_id":continuity["plan_id"],
@@ -436,7 +436,7 @@ class Specialist:
                             c_id = f'{c_id_pre}:*:1:{nonce}'
                             msg = validated_result.get('content')
                             
-                            self.AGU.save_chat(validated_result, connection_id=self._get_context().connection_id, next=c_id)
+                            self.AGU.save_chat(validated_result, next=c_id)
                             
                             log_entry = {
                                     "plan_id":continuity["plan_id"],
@@ -495,21 +495,21 @@ class Specialist:
                 raise ValueError("❌ No tool name provided in tool selection")
                 
             print(f"Selected tool: {tool_name}")
-            self.AGU.print_chat(f'Calling tool {tool_name} with parameters {params} ', 'text', connection_id=self._get_context().connection_id)
+            self.AGU.print_chat(f'Calling tool {tool_name} with parameters {params} ', 'transient')
             print(f"Parameters: {params}")
 
             # Check if handler exists
             if tool_name not in list_handlers:
                 error_msg = f"❌ No handler found for tool '{tool_name}'"
                 print(error_msg)
-                self.AGU.print_chat(error_msg, 'text', connection_id=self._get_context().connection_id)
+                self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
             
             # Check if handler is an empty string
             if list_handlers[tool_name] == '':
                 error_msg = f"❌ Handler is empty"
                 print(error_msg)
-                self.AGU.print_chat(error_msg, 'text', connection_id=self._get_context().connection_id)
+                self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
                 
             # Check if handler has the right format
@@ -518,7 +518,7 @@ class Specialist:
             if len(parts) != 2:
                 error_msg = f"❌ {tool_name} is not a valid tool."
                 print(error_msg)
-                self.AGU.print_chat(error_msg, 'text', connection_id=self._get_context().connection_id)
+                self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
             
 
@@ -572,7 +572,7 @@ class Specialist:
             # Important: Because we had to create a response message in advance, we are upserting an existing message, not creating a new one. 
             #  The upsert only takes 'content', '_interface' and '_next' changes. 
             
-            self.AGU.save_chat(tool_out,interface=interface,connection_id=self._get_context().connection_id, next = c_id)     
+            self.AGU.save_chat(tool_out,interface=interface, next = c_id)     
             
             
             print(f'act:flag3')
@@ -630,7 +630,7 @@ class Specialist:
             # We are passing the error results via the context instead
 
             error_msg = f"❌ Tool failed. Trying something different. @act trying to run tool:'{tool_name}': {str(e)}"
-            self.AGU.print_chat(error_msg,'text', connection_id=self._get_context().connection_id) 
+            self.AGU.print_chat(error_msg,'error') 
             print(error_msg)
             self._update_context(execute_intention_error=error_msg)
             
@@ -671,7 +671,7 @@ class Specialist:
             if len(parts) != 2:
                 error_msg = f"❌ {tool_name} is not a valid tool."
                 print(error_msg)
-                self.AGU.print_chat(error_msg, 'text', connection_id=self._get_context().connection_id)
+                self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
             
             portfolio = self._get_context().portfolio
@@ -693,7 +693,7 @@ class Specialist:
             
             tool_name_str = tool_name if tool_name else 'unknown'
             error_msg = f"❌ Check failed. @check :'{tool_name_str}': {str(e)}"
-            self.AGU.print_chat(error_msg,'text', connection_id=self._get_context().connection_id) 
+            self.AGU.print_chat(error_msg,'error') 
             print(error_msg)
             self._update_context(execute_intention_error=error_msg)
             
@@ -739,7 +739,7 @@ class Specialist:
             if len(parts) != 2:
                 error_msg = f"❌ {verification_handler} is not a valid verification tool."
                 print(error_msg)
-                self.AGU.print_chat(error_msg, 'text', connection_id=self._get_context().connection_id)
+                self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
             
             portfolio = self._get_context().portfolio
@@ -774,7 +774,7 @@ class Specialist:
                 }
                 self.AGU.mutate_workspace({'action_log': log_entry})
                 
-                self.AGU.print_chat(msg,'text', connection_id=self._get_context().connection_id) 
+                self.AGU.print_chat(msg,'transient') 
                 print(msg)
             
             else:     
@@ -797,7 +797,7 @@ class Specialist:
             
             verification_handler_str = verification_handler if verification_handler else 'unknown'
             error_msg = f"❌ Verification failed. @verify :'{verification_handler_str}': {str(e)}"
-            self.AGU.print_chat(error_msg,'text', connection_id=self._get_context().connection_id) 
+            self.AGU.print_chat(error_msg,'error') 
             print(error_msg)
             self._update_context(execute_intention_error=error_msg)
             
@@ -1000,7 +1000,7 @@ class Specialist:
                     # Or agent is answering questions directly from the belief system.
                     print(f'Run() >> Specialist exits because it sent a direct message to the user.')
                     
-                    self.AGU.print_chat(f'Specialist > 🤖','text', connection_id=context.connection_id)
+                    self.AGU.print_chat(f'Specialist > 🤖','transient')
                     
                     # The above code is creating a Python dictionary named `output` with a single
                     # key-value pair. The key is 'status' and the value is 'awaiting'.
@@ -1024,13 +1024,12 @@ class Specialist:
             
             # If we reach here, we hit the loop limit
             print(f'Warning: Reached maximum loop limit ({loop_limit})')
-            #self.print_chat(f'🤖⚠️  Can you re-formulate your request please?','text')
+            self.print_chat(f'🤖⚠️  Can you re-formulate your request please?','text')
             return {'success':True,'action':action,'input':payload,'output':response_3['output'],'stack':results}
             
         
-        except Exception as e:
-            self.AGU.print_chat(e,'text', connection_id=context.connection_id)
-            self.AGU.print_chat(f'🤖❌','text', connection_id=context.connection_id)
+        except Exception as e: 
+            self.AGU.print_chat(f'🤖❌:{e}','transient')
             return {'success':False,'action':action,'output':f'Run failed. Error:{str(e)}','stack':results}
 
         

@@ -1556,7 +1556,7 @@ class GeneratePlan:
             
             # All went well, report back
             canonical = results[-1]['output'] # This is a dictionary {'plan':{},'signature':{}}
-            return {'success': True, 'message': 'run completed', 'input': payload, 'output': canonical, 'stack': results}
+            return {'success': True, 'interface': 'plan', 'input': payload, 'output': canonical, 'stack': results}
             
         except Exception as e:
             print(f'Error during execution: {str(e)}')
