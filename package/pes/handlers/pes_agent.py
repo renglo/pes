@@ -711,7 +711,7 @@ class PesAgent:
                 raise ValueError("❌ No tool name provided in tool selection")
                 
             print(f"Selected tool: {tool_name}")
-            self.AGU.print_chat(f'Calling tool {tool_name} with parameters {params} ', 'error')
+            self.AGU.print_chat(f'Calling tool {tool_name} with parameters {params} ', 'transient')
             print(f"Parameters: {params}")
 
             # Check if handler exists
@@ -1198,7 +1198,7 @@ class PesAgent:
             return {'success':True,'action':action,'input':payload,'output':results}
                 
         except Exception as e:
-            self.AGU.print_chat(f'🤖❌:{e}','error')
+            self.AGU.print_chat(f'🤖❌(pes_agent):{e}','error')
             error_result = {'success':False,'action':action,'output':f'Plan Generation Run failed. Error:{str(e)}'}
             results.append(error_result)
             return {'success':False,'action':action,'output':f'Plan Generation Run failed. Error:{str(e)}','stack':results}
