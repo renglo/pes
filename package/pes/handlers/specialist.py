@@ -504,13 +504,21 @@ class Specialist:
         
     ## Execution of Intentions
     def act(self,command):
-        action = 'act'
+        function = 'act'
         
         list_tools_raw = self._get_context().list_tools
         
         list_handlers = {}
+        list_inits = {}
         for t in list_tools_raw:
             list_handlers[t.get('key', '')] = t.get('handler', '')
+            init_value = t.get('init', {})
+            if isinstance(init_value, str):
+                try:
+                    init_value = json.loads(init_value)
+                except (json.JSONDecodeError, ValueError):
+                    init_value = {}
+            list_inits[t.get('key', '')] = init_value if isinstance(init_value, dict) else {}
             
         self._update_context(list_handlers=list_handlers)
     
@@ -545,6 +553,12 @@ class Specialist:
                 print(error_msg)
                 self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
+            
+            # Check if init exists and is valid
+            handler_init = {}
+            if not isinstance(list_inits[tool_name], str) and isinstance(list_inits[tool_name], dict):
+                handler_init = list_inits[tool_name]
+                
                 
             # Check if handler has the right format (2 parts: tool/handler, or 3 parts: tool/handler/subhandler)
             handler_route = list_handlers[tool_name]
@@ -567,6 +581,7 @@ class Specialist:
             params['_entity_type'] = self._get_context().entity_type
             params['_entity_id'] = self._get_context().entity_id
             params['_thread'] = self._get_context().thread
+            params['_init'] = handler_init
             
             print(f'Calling {handler_route} ') 
             
@@ -658,7 +673,7 @@ class Specialist:
             print("✅ Tool execution complete.")
             
             
-            return {"success": True, "action": action, "input": command, "output": tool_out}
+            return {"success": True, "function": function, "input": command, "output": tool_out}
                     
         except Exception as e:
             
@@ -666,8 +681,8 @@ class Specialist:
             # Interpret uses messages to read the output of act(). 
             # We are passing the error results via the context instead
 
-            #error_msg = f"❌ Tool failed. Trying something different. @act trying to run tool:'{tool_name}': {str(e)}"
-            #self.AGU.print_chat(error_msg,'error') 
+            error_msg = f"❌ Tool failed. Trying something different. @act trying to run tool:'{tool_name}': {str(e)}"
+            self.AGU.print_chat(error_msg,'error') 
             self._update_context(execute_intention_error=error_msg)
             
             continuity = self._get_context().continuity
@@ -1012,8 +1027,7 @@ class Specialist:
                         
                         
                     # Run verification script to figure out if action is done
-                    #response_2c= self.verify(context.current_action)
-                    response_2c = {'success':True,'input':context.current_action,'output':'Verification skipped'} # REMOVE!!!
+                    response_2c= self.verify(context.current_action)
                     results.append(response_2c)
                     if response_2c['success']:
                         # Action is done, exit the specialist
