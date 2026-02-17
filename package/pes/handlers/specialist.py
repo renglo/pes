@@ -828,13 +828,26 @@ class Specialist:
                 self.AGU.print_chat(msg,'transient') 
                 print(msg)
             
-            else:     
+            else:
+                output = response.get('output')
+                if isinstance(output, dict):
+                    actionable = output.get('actionable')
+                elif isinstance(output, list):
+                    actionable = None
+                    for item in output:
+                        if isinstance(item, dict) and item.get('actionable'):
+                            actionable = item.get('actionable')
+                            break
+                else:
+                    actionable = None
+                    
                 msg = f"Step has not been completed yet. Continue the loop"
                 continuity = self._get_context().continuity  
                 log_entry = {
                             "plan_id":continuity["plan_id"],
                             "plan_step":continuity["plan_step"],
-                            "message":msg
+                            "message":msg,
+                            "actionable":actionable
                 }
                 self.AGU.mutate_workspace({'action_log': log_entry})
                 # We don't need to record in action_log when verification is KO 
