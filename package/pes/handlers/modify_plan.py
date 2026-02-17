@@ -262,7 +262,7 @@ class Modifier:
         """
         # Tokens that should be wrapped in JSON code blocks
         json_tokens = {
-            'sig_text', 'example_cases', 'fact_texts', 'catalog_summary',
+            'intent_text', 'sig_text', 'example_cases', 'fact_texts', 'catalog_summary',
             'catalog', 'skills', 'activities_requested', 'plan_details',
             'existing_plan'
         }
@@ -693,10 +693,10 @@ class ModifyPlan:
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
-        Returns a dictionary with keys: 'to_signature', 'adapt_plan', 'compose_plan', 'select_best_plan', 'modify_plan'
+        Returns a dictionary with keys: 'to_intent', 'adapt_plan', 'compose_plan', 'select_best_plan', 'modify_plan'
         """
         prompts = {
-            'to_signature': '',
+            'to_intent': '',
             'adapt_plan': '',
             'compose_plan': '',
             'select_best_plan': '',
@@ -734,8 +734,8 @@ class ModifyPlan:
                         prompt_text = prompt_text.lstrip()
                     
                     # Map keys to prompt types using exact match only
-                    if key == 'to_signature':
-                        prompts['to_signature'] = prompt_text
+                    if key == 'to_intent':
+                        prompts['to_intent'] = prompt_text
                     elif key == 'adapt_plan':
                         prompts['adapt_plan'] = prompt_text
                     elif key == 'compose_plan':

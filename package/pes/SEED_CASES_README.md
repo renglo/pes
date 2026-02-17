@@ -5,7 +5,21 @@ This directory contains seed cases that can be inserted into the database for th
 ## Files
 
 - **`seed_cases.json`** - Database-ready format (use this for insertion)
-- **`seed_cases_readable.json`** - Human-readable format (for reference/editing)
+- **`seed_cases_readable.json`** - Human-readable format with full intent structure (renglo.intent.v1)
+- **`scripts/build_seed_cases.py`** - Converts readable → seed_cases.json
+
+## Intent Structure (renglo.intent.v1)
+
+The intent schema is domain-agnostic. For travel, it uses:
+
+- **`itinerary.segments`** - Flight legs: `[{ origin: {code}, destination: {code}, depart_date }]`
+- **`itinerary.lodging.stays`** - Hotel stays: `[{ location_code, check_in, check_out }]`
+- **`party.travelers`** - `{ adults, children, infants }`
+- **`extras.activities`** - Domain-specific activities (conference, meeting, leisure, etc.)
+- **`preferences`** - `{ flight: {}, hotel: {} }`
+- **`constraints`** - `{ budget_total, currency, refundable_preference }`
+
+The readable format shows intent→plan cause-effect for the LLM.
 
 ## Database Structure
 
@@ -14,7 +28,7 @@ Each case in the database should have the following structure:
 ```json
 {
   "id": "unique_case_id",
-  "text": "{\"signature\":\"{...}\",\"plan\":{\"steps\":[...]}}",
+  "text": "{\"intent\":\"{...}\",\"plan\":{\"steps\":[...]}}",
   "meta": {
     "destination": "...",
     "case_type": "...",
@@ -28,9 +42,17 @@ Each case in the database should have the following structure:
 
 - **`id`**: Unique identifier for the case (e.g., "seed_case_001")
 - **`text`**: JSON string containing:
-  - `signature`: A JSON string (compact format, as returned by `Signature.to_text()`)
+  - `intent`: A JSON string (compact format, as returned by `intent_to_text()`)
   - `plan`: An object with a `steps` array containing plan steps
 - **`meta`**: Metadata object for filtering and searching cases
+
+### Regenerating seed_cases.json
+
+From `extensions/pes/package`:
+
+```bash
+python3 pes/scripts/build_seed_cases.py
+```
 
 ## How to Insert into Database
 
@@ -91,8 +113,8 @@ for case in cases:
 
 ## Notes
 
-- The `signature` field in the `text` JSON string is itself a JSON string (double-encoded)
-- This matches the format used by `Signature.to_text()` which returns a compact JSON string
+- The `intent` field in the `text` JSON string is itself a JSON string (double-encoded)
+- This matches the format used by `intent_to_text()` which returns a compact JSON string
 - The `plan.steps` array contains all the plan steps with their actions, inputs, and dependencies
 - Metadata fields can be used for filtering cases by destination, type, season, or purpose
 

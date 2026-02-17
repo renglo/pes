@@ -22,14 +22,14 @@
     {
       "cardinality": "single",
       "default": "",
-      "hint": "Signature object containing domain, goal, destination, party, dates, constraints, preferences, activities, and extras",
-      "label": "Signature",
+      "hint": "Intent object containing itinerary (segments, lodging), party.travelers, preferences, constraints",
+      "label": "Intent",
       "layer": "1",
       "multilingual": false,
-      "name": "signature",
+      "name": "intent",
       "order": "2",
       "required": false,
-      "semantic": "isd:signature",
+      "semantic": "isd:intent",
       "source": "",
       "type": "object",
       "widget": "json"
