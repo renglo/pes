@@ -433,9 +433,11 @@ class CommitPlan:
                     continue
                 output = entry.get('output') or {}
                 plan = output.get('plan')
+                intent = output.get('intent')
+                plan_and_intent = {'plan':plan,'intent':intent}
                 if plan is not None:
                     print('Plan:', plan)
-                    return {'success': True, 'action': action, 'input': '', 'output': plan}
+                    return {'success': True, 'action': action, 'input': '', 'output': plan_and_intent}
                 
             print(f'Cache key {cache_key} not found')
             return {
@@ -459,19 +461,19 @@ class CommitPlan:
      
      
             
-    def add_plan(self,plan):
-        function = 'add_plan'
+    def add_plan_and_intent(self,payload):
+        function = 'add_plan_and_intent'
         
         try:
-            pr = f'add_plan > plan: {plan}'
+            pr = f'add_plan_and_intent : {payload}'
             print(pr)
-            saved = self.AGU.mutate_workspace({'plan': plan})
-            plan_id = plan['id']
+            saved = self.AGU.mutate_workspace({'plan': payload['plan'],'intent': payload['intent']})
+            plan_id = payload['plan']['id']
             
             if saved:
-                return {'success':True,'function':function,'input': plan,'output':plan_id}
+                return {'success':True,'function':function,'input': payload,'output':plan_id}
             else:
-                return {'success':False,'function':function,'input': plan,'output':plan_id}
+                return {'success':False,'function':function,'input': payload,'output':plan_id}
             
         except Exception as e:
             pr = f'Error in saving plan: {str(e)}'
@@ -482,6 +484,8 @@ class CommitPlan:
                 'error': pr,
                 'output': 0
             }
+            
+
     
             
             
@@ -557,7 +561,7 @@ class CommitPlan:
         if not response_1['success']: 
             return {'success': False, 'output': results}
         
-        response_2 = self.add_plan(response_1['output'])
+        response_2 = self.add_plan_and_intent(response_1['output'])
         results.append(response_2)
         if not response_2['success']: 
             return {'success': False, 'output': results}

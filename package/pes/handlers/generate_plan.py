@@ -1,7 +1,12 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple, Protocol, Union
-import json, math, time, uuid, re
+import copy
+import json
+import math
+import re
+import time
+import uuid
 import os
 from openai import OpenAI
 from collections import Counter
@@ -46,6 +51,8 @@ def new_intent(intent_id: str, user_message: str) -> Dict[str, Any]:
         },
         "party": {
             "travelers": {"adults": 0, "children": 0, "infants": 0},
+            "traveler_ids": [],
+            "travelers_by_id": {},
             "traveler_profile_ids": [],
             "guests": [],
             "contact": {"email": None, "phone": None},
@@ -53,6 +60,8 @@ def new_intent(intent_id: str, user_message: str) -> Dict[str, Any]:
         "itinerary": {
             "trip_type": None,
             "segments": [],
+            "day_trips": [],
+            "converging": False,
             "lodging": {
                 "needed": True,
                 "check_in": None,
@@ -80,39 +89,69 @@ def new_intent(intent_id: str, user_message: str) -> Dict[str, Any]:
     }
 
 
-def intent_to_text(ti: Dict[str, Any]) -> str:
-    """Compact JSON for retrieval and plan generation. Extracts key request characteristics."""
+def intent_for_retrieval(ti: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract retrieval-relevant fields from intent. Returns dict; serialize with json.dumps() when needed."""
     out: Dict[str, Any] = {}
     party = ti.get("party") or {}
     travelers = party.get("travelers") or {}
     if travelers:
         out["party"] = {"travelers": travelers}
+        if party.get("traveler_ids"):
+            out["party"]["traveler_ids"] = party["traveler_ids"]
+        if party.get("travelers_by_id"):
+            out["party"]["travelers_by_id"] = party["travelers_by_id"]
     iti = ti.get("itinerary") or {}
     if iti.get("trip_type"):
         out["trip_type"] = iti["trip_type"]
+    if iti.get("converging"):
+        out["converging"] = True
     segs = iti.get("segments") or []
     if segs:
-        out["segments"] = [
-            {
+        out["segments"] = []
+        for s in segs:
+            seg = {
                 "origin": (s.get("origin") or {}).get("code") if isinstance(s.get("origin"), dict) else s.get("origin"),
                 "destination": (s.get("destination") or {}).get("code") if isinstance(s.get("destination"), dict) else s.get("destination"),
                 "depart_date": s.get("depart_date"),
+                "passengers": s.get("passengers"),
             }
-            for s in segs
-        ]
+            if s.get("traveler_ids"):
+                seg["traveler_ids"] = s["traveler_ids"]
+            out["segments"].append(seg)
     lod = iti.get("lodging") or {}
     if lod.get("stays"):
         out["stays"] = lod["stays"]
     elif lod.get("check_in") or lod.get("check_out"):
         out["lodging"] = {"check_in": lod.get("check_in"), "check_out": lod.get("check_out"), "location_hint": lod.get("location_hint")}
+    if lod.get("number_of_nights") is not None:
+        out.setdefault("lodging", {})["number_of_nights"] = lod["number_of_nights"]
+    if "needed" in lod:
+        out.setdefault("lodging", {})["needed"] = lod["needed"]
+    extras = ti.get("extras") or {}
+    if extras.get("activities"):
+        out["activities"] = extras["activities"]
+    if extras.get("itinerary"):
+        out["itinerary"] = extras["itinerary"]
+    if extras.get("travelers"):
+        out["converging_travelers"] = extras["travelers"]
     prefs = ti.get("preferences") or {}
     if prefs:
         out["preferences"] = prefs
     constraints = ti.get("constraints") or {}
     if constraints and any(v for v in constraints.values() if v):
         out["constraints"] = constraints
-    return json.dumps(out, sort_keys=True, separators=(",", ":"))
+    return out
 
+
+def intent_for_plan(ti: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract plan-relevant fields from intent for prompts. Returns dict; serialize with json.dumps() when needed."""
+    return {
+        "party": ti.get("party") or {},
+        "itinerary": ti.get("itinerary") or {},
+        "extras": ti.get("extras") or {},
+        "preferences": ti.get("preferences") or {},
+        "constraints": ti.get("constraints") or {},
+    }
 
 def intent_destination(ti: Dict[str, Any]) -> Optional[str]:
     """Extract primary destination for retrieval filters."""
@@ -127,23 +166,6 @@ def intent_destination(ti: Dict[str, Any]) -> Optional[str]:
     if stays:
         return stays[0].get("location_code")
     return lod.get("location_hint")
-
-
-def intent_activities(ti: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract activities for plan selection (from extras or inferred from itinerary)."""
-    extras = ti.get("extras") or {}
-    acts = extras.get("activities") or []
-    if acts:
-        return acts
-    out: List[Dict[str, Any]] = []
-    segs = (ti.get("itinerary") or {}).get("segments") or []
-    if segs:
-        out.append({"type": "flight", "description": "Flight segments"})
-    lod = (ti.get("itinerary") or {}).get("lodging") or {}
-    if lod.get("needed") or lod.get("stays"):
-        out.append({"type": "lodging", "description": "Hotel stay"})
-    return out
-
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -333,7 +355,7 @@ class AIResponsesLLM:
                     "properties": {
                         "origin": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                         "destination": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                        "trip_type": {"anyOf": [{"type": "string", "enum": ["one_way", "round_trip", "multi_city"]}, {"type": "null"}]},
+                        "trip_type": {"anyOf": [{"type": "string", "enum": ["one_way", "round_trip", "multi_city", "single_destination", "day_trip", "converging"]}, {"type": "null"}]},
                         "dates": {
                             "type": "object",
                             "properties": {
@@ -349,9 +371,15 @@ class AIResponsesLLM:
                                 "properties": {
                                     "origin": {"type": "string"},
                                     "destination": {"type": "string"},
-                                    "depart_date": {"type": "string"}
+                                    "depart_date": {"type": "string"},
+                                    "passengers": {"type": "integer"},
+                                    "traveler_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "For converging: e.g. [\"t1\",\"t2\",\"t3\"]"
+                                    }
                                 },
-                                "additionalProperties": False
+                                "additionalProperties": True
                             }
                         },
                         "stays": {
@@ -361,9 +389,15 @@ class AIResponsesLLM:
                                 "properties": {
                                     "location_code": {"type": "string"},
                                     "check_in": {"type": "string"},
-                                    "check_out": {"type": "string"}
+                                    "check_out": {"type": "string"},
+                                    "number_of_guests": {"type": "integer"},
+                                    "traveler_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "For converging: e.g. [\"t1\",\"t2\",\"t3\"]"
+                                    }
                                 },
-                                "additionalProperties": False
+                                "additionalProperties": True
                             }
                         },
                         "travelers": {
@@ -380,9 +414,47 @@ class AIResponsesLLM:
                             "properties": {
                                 "needed": {"type": "boolean"},
                                 "check_in": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                                "check_out": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                                "check_out": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                "number_of_nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
                             },
                             "additionalProperties": False
+                        },
+                        "activities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "location": {"type": "string"},
+                                    "when": {"type": "string"}
+                                },
+                                "additionalProperties": False
+                            }
+                        },
+                        "itinerary": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": {"type": "string"},
+                                    "to": {"type": "string"},
+                                    "date": {"type": "string"}
+                                },
+                                "additionalProperties": False
+                            }
+                        },
+                        "converging_travelers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "count": {"type": "integer"},
+                                    "origin": {"type": "string"},
+                                    "arrival_date": {"type": "string"}
+                                },
+                                "additionalProperties": False
+                            }
                         },
                         "extras": {"type": "object", "additionalProperties": True}
                     },
@@ -474,6 +546,36 @@ class AIResponsesLLM:
                     "additionalProperties": False
                 },
                 "strict": True
+            }
+        if task == "MODIFY_INTENT_DELTA":
+            return {
+                "name": "ModifyIntentDelta",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "changes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["extend_stay", "shorten_stay", "add_side_trip", "change_dates"]},
+                                    "until_date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                    "add_nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                                    "remove_nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                                    "city": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                    "nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                                    "departure_date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                    "return_date": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                                },
+                                "required": ["type"],
+                                "additionalProperties": True
+                            }
+                        }
+                    },
+                    "required": ["changes"],
+                    "additionalProperties": False
+                },
+                "strict": False
             }
         # Default permissive JSON object
         return {
@@ -613,8 +715,8 @@ class Planner:
         """
         # Tokens that should be wrapped in JSON code blocks
         json_tokens = {
-            'intent_text', 'sig_text', 'example_cases', 'fact_texts', 'catalog_summary',
-            'catalog', 'skills', 'activities_requested', 'plan_details'
+            'intent_text', 'example_cases', 'fact_texts', 'catalog_summary',
+            'catalog', 'skills', 'activities_requested', 'plan_details', 'intent_examples'
         }
         
         for token, value in replacements.items():
@@ -642,9 +744,11 @@ class Planner:
         
         return prompt
 
-    # 1) Trip intent extraction via LLM
-    def to_intent(self, req: Dict[str, Any], intent_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Extract requirements from user message and return full intent."""
+    # 1) Trip intent extraction via LLM - examples inform extraction (intent should be explicit for plan)
+    def to_intent(self, req: Dict[str, Any], intent_id: Optional[str] = None,
+                  cases: Optional[List[VDBItem]] = None, facts: Optional[List[VDBItem]] = None,
+                  skills: Optional[List[VDBItem]] = None) -> Optional[Dict[str, Any]]:
+        """Extract requirements from user message. Examples from VDB inform how to structure the intent."""
         print('Extracting trip intent from user request...')
         user_message = req.get("request", "") if isinstance(req.get("request"), str) else json.dumps(req)
         if isinstance(user_message, dict):
@@ -664,38 +768,81 @@ class Planner:
         intent["request"]["now_iso"] = now_iso
         intent["request"]["now_date"] = now_date
 
+        intent_examples = ""
+        if cases:
+            examples = []
+            for c in cases[:3]:
+                try:
+                    obj = json.loads(c.text)
+                    ex_intent = obj.get("intent", obj.get("trip_intent", ""))
+                    if ex_intent:
+                        examples.append({"intent_structure": ex_intent})
+                except Exception:
+                    pass
+            if examples:
+                intent_examples = json.dumps(examples, indent=2)
+
+        fact_texts = ""
+        if facts:
+            fact_texts = json.dumps([{"text": f.text, "meta": f.meta} for f in facts[:4]], indent=2)
+
         prompt_template = self.prompts.get('to_intent', '')
         if prompt_template:
-            replacements = {'request_text': user_message, 'current_time': now_iso, 'now_date': now_date}
+            replacements = {
+                'request_text': user_message, 'current_time': now_iso, 'now_date': now_date,
+                'intent_examples': intent_examples or '[]', 'fact_texts': fact_texts or '[]'
+            }
             prompt = self._replace_tokens(prompt_template, replacements)
+            if '#intent_examples#' not in prompt_template and intent_examples:
+                prompt += f"\n\nEXAMPLE INTENTS (learn structure from these):\n```json\n{intent_examples}\n```"
         else:
+            # FALLBACK: used when pes_prompts.to_intent is empty; domain-specific (trips)
             prompt = f"""You are a travel requirements extractor. Extract trip details from the user message.
 
 Time context: Today is {now_date} ({now_iso}). Use YYYY-MM-DD for all dates. Dates must be on or after today.
 
-Rules:
-- Origin/destination: use IATA airport codes when possible (JFK, EWR, SFO, LAX, MIA, MCO, DFW, etc.)
+TRIP TYPES:
+- single_destination: Origin → Destination → Origin with overnight stay (default when origin+dest+lodging)
+- round_trip: Same as single_destination (use interchangeably)
+- day_trip: Same-day return, NO hotel (origin → dest → origin same day)
+- multi_city: A → B → C → ... → A (multiple cities, use "segments" and "itinerary")
+- converging: Multiple groups from different origins meeting at one destination (use "converging_travelers")
+
+RULES:
+- Origin/destination: use IATA airport codes when possible (JFK, EWR, SFO, LAX, MIA, MCO, DFW, GRU, etc.)
 - travelers: {{"adults": N, "children": 0, "infants": 0}} - adults required
-- Multi-city: output "segments" (one per flight leg) and "stays" (one per city). First segment origin = departure city.
-- For "X days in Y" or "3 nights": check_out = check_in + nights; next stay check_in = previous check_out
-- trip_type: "one_way" | "round_trip" | "multi_city"
+- For "X days in Y" or "3 nights": check_out = check_in + nights; lodging.number_of_nights = X
+- Multi-city: output "segments" (one per flight leg) and "itinerary" [{{"from":"City","to":"City","date":"YYYY-MM-DD"}}]
+- Day trip: same date for outbound and return, lodging.needed = false, no stays
+- Activities: Extract ALL requested (city_tour, restaurant, day_trip, theater, museum, spa, conference, meeting)
+  Format: [{{"type":"city_tour","description":"guided tour","location":"City"}}]
+- Converging: converging_travelers = [{{"count":N,"origin":"City","arrival_date":"YYYY-MM-DD"}}]
+  - For converging: create SEPARATE stays per group (each with own check_in/check_out, number_of_guests=count)
+  - Each segment and stay MUST have explicit passengers/number_of_guests
 
 TASK: TO_TRIP_INTENT
 Return ONLY valid JSON:
 {{
   "origin": "IATA or null",
   "destination": "IATA or null",
-  "trip_type": "one_way|round_trip|multi_city or null",
+  "trip_type": "single_destination|round_trip|one_way|day_trip|multi_city|converging or null",
   "dates": {{"departure_date": "YYYY-MM-DD or null", "return_date": "YYYY-MM-DD or null"}},
-  "segments": [{{"origin": "IATA", "destination": "IATA", "depart_date": "YYYY-MM-DD"}}],
-  "stays": [{{"location_code": "IATA", "check_in": "YYYY-MM-DD", "check_out": "YYYY-MM-DD"}}],
+  "segments": [{{"origin": "IATA", "destination": "IATA", "depart_date": "YYYY-MM-DD", "passengers": N}}],
+  "stays": [{{"location_code": "IATA", "check_in": "YYYY-MM-DD", "check_out": "YYYY-MM-DD", "number_of_guests": N}}],
   "travelers": {{"adults": 1, "children": 0, "infants": 0}},
-  "lodging": {{"needed": true, "check_in": "YYYY-MM-DD or null", "check_out": "YYYY-MM-DD or null"}},
+  "lodging": {{"needed": true, "check_in": "YYYY-MM-DD or null", "check_out": "YYYY-MM-DD or null", "number_of_nights": N or null}},
+  "activities": [{{"type": "activity_type", "description": "details", "location": "where"}}],
+  "itinerary": [{{"from": "City", "to": "City", "date": "YYYY-MM-DD"}}],
+  "converging_travelers": [{{"count": N, "origin": "City", "arrival_date": "YYYY-MM-DD"}}],
   "extras": {{}}
 }}
 
 User message: {user_message}
 """
+            if intent_examples:
+                prompt += f"\n\nEXAMPLE INTENTS (learn structure from these similar cases):\n```json\n{intent_examples}\n```"
+            if fact_texts:
+                prompt += f"\n\nRELEVANT FACTS:\n```json\n{fact_texts}\n```"
         data = self.llm.complete_json(prompt)
         if not data:
             print('[ERROR] LLM returned no data for intent')
@@ -733,7 +880,47 @@ User message: {user_message}
         if trip_type:
             intent.setdefault("itinerary", {})["trip_type"] = trip_type
 
+        def _total_travelers(t: Dict[str, Any]) -> int:
+            if not t:
+                return 1
+            return int(t.get("adults", 0) or 0) + int(t.get("children", 0) or 0) + int(t.get("infants", 0) or 0)
+
+        def _build_traveler_ids() -> Tuple[List[str], List[List[str]], Dict[str, Dict[str, Any]]]:
+            """Build traveler_ids, traveler_ids_by_group (for converging), and travelers_by_id."""
+            by_id: Dict[str, Dict[str, Any]] = {}
+            ids_list: List[str] = []
+            ids_by_group: List[List[str]] = []
+            if converging:
+                idx = 0
+                for gi, ct in enumerate(converging):
+                    n = int(ct.get("count", 0) or 0)
+                    group_ids = []
+                    for _ in range(n):
+                        tid = f"t{idx + 1}"
+                        ids_list.append(tid)
+                        group_ids.append(tid)
+                        by_id[tid] = {
+                            "group_index": gi,
+                            "origin": ct.get("origin"),
+                            "arrival_date": ct.get("arrival_date"),
+                        }
+                        idx += 1
+                    ids_by_group.append(group_ids)
+            else:
+                n = _total_travelers(travelers) if isinstance(travelers, dict) else 1
+                group_ids = [f"t{i + 1}" for i in range(n)]
+                ids_list = group_ids
+                ids_by_group = [group_ids]
+                for i, tid in enumerate(group_ids):
+                    by_id[tid] = {"group_index": 0}
+            return ids_list, ids_by_group, by_id
+
         segs: List[Dict[str, Any]] = []
+        converging = extracted.get("converging_travelers") or []
+        default_passengers = _total_travelers(travelers) if isinstance(travelers, dict) else 1
+        traveler_ids_list, traveler_ids_by_group, travelers_by_id = _build_traveler_ids()
+        intent.setdefault("party", {})["traveler_ids"] = traveler_ids_list
+        intent.setdefault("party", {})["travelers_by_id"] = travelers_by_id
         if extracted_segs:
             for i, es in enumerate(extracted_segs):
                 o = es.get("origin") or es.get("origin_code")
@@ -743,77 +930,300 @@ User message: {user_message}
                 depart = es.get("depart_date")
                 if depart:
                     depart = clamp_date(depart)
+                pax = es.get("passengers")
+                if pax is None and converging:
+                    o_upper = str(o_code).upper() if o_code else ""
+                    for ct in converging:
+                        orig = (ct.get("origin") or "").upper()
+                        if len(orig) == 3 and o_upper == orig:
+                            pax = int(ct.get("count", 0) or 0)
+                            break
+                        if orig and o_upper and orig in o_upper:
+                            pax = int(ct.get("count", 0) or 0)
+                            break
+                if pax is None:
+                    pax = default_passengers
+                raw_tids = es.get("traveler_ids") if isinstance(es.get("traveler_ids"), list) else []
+                valid_tids = set(traveler_ids_list)
+                seg_tids = [t for t in raw_tids if t in valid_tids] if raw_tids else []
+                if not seg_tids and converging:
+                    o_upper = str(o_code).upper() if o_code else ""
+                    d_upper = str(d_code).upper() if d_code else ""
+                    for gi, ct in enumerate(converging):
+                        orig = (ct.get("origin") or "").upper()
+                        if (len(orig) == 3 and o_upper == orig) or (orig and o_upper and orig in o_upper):
+                            seg_tids = traveler_ids_by_group[gi] if gi < len(traveler_ids_by_group) else []
+                            break
+                        if (len(orig) == 3 and d_upper == orig) or (orig and d_upper and orig in d_upper):
+                            seg_tids = traveler_ids_by_group[gi] if gi < len(traveler_ids_by_group) else []
+                            break
+                    origins_set = {(ct.get("origin") or "").upper()[:3] for ct in converging if ct.get("origin")}
+                    is_meeting_point = o_upper and o_upper not in origins_set and len(o_upper) == 3
+                    if not seg_tids and is_meeting_point:
+                        seg_tids = traveler_ids_list
+                if not seg_tids and not converging:
+                    seg_tids = traveler_ids_list
                 if o_code and d_code and depart:
-                    segs.append({
+                    seg = {
                         "segment_id": es.get("segment_id") or f"seg_{i}",
                         "origin": {"type": "airport", "code": o_code},
                         "destination": {"type": "airport", "code": d_code},
                         "depart_date": depart,
+                        "passengers": pax,
                         "transport_mode": es.get("transport_mode", "flight"),
                         "depart_time_window": {"start": None, "end": None},
-                    })
+                    }
+                    if seg_tids:
+                        seg["traveler_ids"] = seg_tids
+                    segs.append(seg)
+            # For converging: add return segments (one per group to their origin) if not already present
+            if converging and segs:
+                dest_code = (segs[0].get("destination") or {}).get("code") if segs else None
+                has_return = False
+                if dest_code:
+                    for s in segs:
+                        o = (s.get("origin") or {}).get("code") if isinstance(s.get("origin"), dict) else s.get("origin")
+                        if str(o or "").upper() == str(dest_code).upper():
+                            has_return = True
+                            break
+                if not has_return and dest_code:
+                    ret_date = clamp_date(dates.get("return_date")) or clamp_date(lod.get("check_out"))
+                    if not ret_date and (lod.get("stays") or extracted.get("stays")):
+                        sts = lod.get("stays") or extracted.get("stays") or []
+                        s0 = sts[0] if sts else {}
+                        ret_date = clamp_date(s0.get("check_out"))
+                    if not ret_date and lod.get("check_in") and lod.get("number_of_nights"):
+                        try:
+                            from datetime import datetime, timedelta
+                            ci = lod.get("check_in")
+                            nights = int(lod.get("number_of_nights", 0))
+                            if ci and nights:
+                                ret_date = (datetime.strptime(str(ci)[:10], "%Y-%m-%d") + timedelta(days=nights)).strftime("%Y-%m-%d")
+                        except Exception:
+                            pass
+                    if ret_date:
+                        for i, ct in enumerate(converging):
+                            orig = ct.get("origin") or ""
+                            orig_code = str(orig).upper() if len(str(orig)) == 3 else str(orig).upper()
+                            if len(orig_code) == 3:
+                                n_pax = int(ct.get("count", 0) or 0)
+                                if n_pax:
+                                    seg_tids = traveler_ids_by_group[i] if i < len(traveler_ids_by_group) else []
+                                    seg = {
+                                        "segment_id": f"seg_return_{i}",
+                                        "origin": {"type": "airport", "code": dest_code},
+                                        "destination": {"type": "airport", "code": orig_code},
+                                        "depart_date": ret_date,
+                                        "passengers": n_pax,
+                                        "transport_mode": "flight",
+                                        "depart_time_window": {"start": None, "end": None},
+                                    }
+                                    if seg_tids:
+                                        seg["traveler_ids"] = seg_tids
+                                    segs.append(seg)
         elif origin and dest:
             dep_date = clamp_date(dates.get("departure_date"))
-            segs.append({
+            if not trip_type:
+                trip_type = "round_trip"
+            if trip_type == "single_destination":
+                trip_type = "round_trip"
+            intent.setdefault("itinerary", {})["trip_type"] = trip_type
+            outbound_seg = {
                 "segment_id": "seg_outbound",
                 "origin": {"type": "airport", "code": origin},
                 "destination": {"type": "airport", "code": dest},
                 "depart_date": dep_date,
+                "passengers": default_passengers,
                 "transport_mode": "flight",
                 "depart_time_window": {"start": None, "end": None},
-            })
-            if trip_type == "round_trip" and dates.get("return_date"):
-                ret_date = clamp_date(dates["return_date"])
-                segs.append({
-                    "segment_id": "seg_return",
-                    "origin": {"type": "airport", "code": dest},
-                    "destination": {"type": "airport", "code": origin},
-                    "depart_date": ret_date,
-                    "transport_mode": "flight",
-                    "depart_time_window": {"start": None, "end": None},
-                })
+            }
+            if traveler_ids_list:
+                outbound_seg["traveler_ids"] = traveler_ids_list
+            segs.append(outbound_seg)
+            if trip_type != "one_way":
+                ret_date = clamp_date(dates.get("return_date"))
+                if not ret_date and trip_type == "day_trip":
+                    ret_date = dep_date
+                if not ret_date and lod.get("stays"):
+                    s0 = lod["stays"][0] if lod["stays"] else {}
+                    ret_date = clamp_date(s0.get("check_out"))
+                if not ret_date:
+                    ret_date = clamp_date(lod.get("check_out"))
+                if not ret_date and lod.get("check_in") and lod.get("number_of_nights"):
+                    try:
+                        from datetime import datetime, timedelta
+                        ci = lod.get("check_in")
+                        nights = int(lod.get("number_of_nights", 0))
+                        if ci and nights:
+                            ci_dt = datetime.strptime(str(ci)[:10], "%Y-%m-%d")
+                            ret_date = (ci_dt + timedelta(days=nights)).strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                if ret_date:
+                    ret_pax = default_passengers
+                    if converging:
+                        ret_pax = sum(int(ct.get("count", 0) or 0) for ct in converging)
+                    ret_seg = {
+                        "segment_id": "seg_return",
+                        "origin": {"type": "airport", "code": dest},
+                        "destination": {"type": "airport", "code": origin},
+                        "depart_date": ret_date,
+                        "passengers": ret_pax,
+                        "transport_mode": "flight",
+                        "depart_time_window": {"start": None, "end": None},
+                    }
+                    if traveler_ids_list:
+                        ret_seg["traveler_ids"] = traveler_ids_list
+                    segs.append(ret_seg)
 
         if segs:
             intent.setdefault("itinerary", {})["segments"] = segs
 
-        extracted_stays = extracted.get("stays") or lod.get("stays") or []
-        if extracted_stays:
+        dest_code = (segs[0].get("destination") or {}).get("code") if segs else dest
+        ret_date = clamp_date(dates.get("return_date")) or (clamp_date(lod.get("check_out")) if lod else None)
+        if not ret_date and segs:
+            for s in segs:
+                o = (s.get("origin") or {}).get("code") if isinstance(s.get("origin"), dict) else s.get("origin")
+                if str(o).upper() == str(dest_code).upper():
+                    ret_date = clamp_date(s.get("depart_date"))
+                    break
+
+        if converging and dest_code:
             stays = []
-            for s in extracted_stays:
-                ci = clamp_date(s.get("check_in"))
-                co = clamp_date(s.get("check_out"))
-                loc = s.get("location_code") or s.get("destination")
-                if ci and co and loc:
-                    stays.append({"location_code": loc, "check_in": ci, "check_out": co, "location_hint": s.get("location_hint")})
+            for i, ct in enumerate(converging):
+                arr = clamp_date(ct.get("arrival_date"))
+                co = ret_date or clamp_date(lod.get("check_out"))
+                if not co and lod.get("check_in") and lod.get("number_of_nights"):
+                    try:
+                        from datetime import datetime, timedelta
+                        ci = lod.get("check_in")
+                        nights = int(lod.get("number_of_nights", 0))
+                        if ci and nights:
+                            co = (datetime.strptime(str(ci)[:10], "%Y-%m-%d") + timedelta(days=nights)).strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                n_guests = int(ct.get("count", 0) or 0)
+                if arr and co and n_guests:
+                    stay_tids = traveler_ids_by_group[i] if i < len(traveler_ids_by_group) else []
+                    stay = {
+                        "location_code": dest_code,
+                        "check_in": arr,
+                        "check_out": co,
+                        "number_of_guests": n_guests,
+                    }
+                    if stay_tids:
+                        stay["traveler_ids"] = stay_tids
+                    stays.append(stay)
             if stays:
                 intent.setdefault("itinerary", {}).setdefault("lodging", {})["stays"] = stays
-        elif lod.get("check_in") or lod.get("check_out"):
-            ci = clamp_date(lod.get("check_in"))
-            co = clamp_date(lod.get("check_out"))
-            dest_code = (segs[0].get("destination") or {}).get("code") if segs else dest
-            if ci and co and dest_code:
-                intent.setdefault("itinerary", {}).setdefault("lodging", {})["stays"] = [
-                    {"location_code": dest_code, "check_in": ci, "check_out": co}
-                ]
+        else:
+            extracted_stays = extracted.get("stays") or lod.get("stays") or []
+            if extracted_stays:
+                stays = []
+                for s in extracted_stays:
+                    ci = clamp_date(s.get("check_in"))
+                    co = clamp_date(s.get("check_out"))
+                    loc = s.get("location_code") or s.get("destination")
+                    n_guests = s.get("number_of_guests")
+                    if n_guests is None:
+                        n_guests = default_passengers
+                    else:
+                        n_guests = int(n_guests)
+                    if ci and co and loc:
+                        stay = {
+                            "location_code": loc,
+                            "check_in": ci,
+                            "check_out": co,
+                            "number_of_guests": n_guests,
+                            "location_hint": s.get("location_hint"),
+                        }
+                        raw_stay_tids = s.get("traveler_ids") if isinstance(s.get("traveler_ids"), list) else []
+                        valid_tids = set(traveler_ids_list)
+                        stay_tids = [t for t in raw_stay_tids if t in valid_tids] if raw_stay_tids else None
+                        if stay_tids:
+                            stay["traveler_ids"] = stay_tids
+                        elif traveler_ids_list:
+                            stay["traveler_ids"] = traveler_ids_list
+                        stays.append(stay)
+                if stays:
+                    intent.setdefault("itinerary", {}).setdefault("lodging", {})["stays"] = stays
+            elif lod.get("check_in") or lod.get("check_out"):
+                ci = clamp_date(lod.get("check_in"))
+                co = clamp_date(lod.get("check_out"))
+                if ci and co and dest_code:
+                    n_guests = default_passengers
+                    stay = {"location_code": dest_code, "check_in": ci, "check_out": co, "number_of_guests": n_guests}
+                    if traveler_ids_list:
+                        stay["traveler_ids"] = traveler_ids_list
+                    intent.setdefault("itinerary", {}).setdefault("lodging", {})["stays"] = [stay]
 
         if "needed" in lod:
             intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = lod["needed"]
+        if lod.get("number_of_nights") is not None:
+            intent.setdefault("itinerary", {}).setdefault("lodging", {})["number_of_nights"] = lod["number_of_nights"]
+
+        activities = extracted.get("activities") or []
+        if activities:
+            intent.setdefault("extras", {})["activities"] = activities
+
+        itinerary_legs = extracted.get("itinerary") or []
+        if itinerary_legs and not segs:
+            for i, leg in enumerate(itinerary_legs):
+                o = leg.get("from") or leg.get("origin")
+                d = leg.get("to") or leg.get("destination")
+                dt = clamp_date(leg.get("date") or leg.get("depart_date"))
+                if o and d and dt:
+                    o_code = str(o).upper() if len(str(o)) == 3 else str(o)
+                    d_code = str(d).upper() if len(str(d)) == 3 else str(d)
+                    seg = {
+                        "segment_id": f"seg_{i}",
+                        "origin": {"type": "airport", "code": o_code},
+                        "destination": {"type": "airport", "code": d_code},
+                        "depart_date": dt,
+                        "passengers": default_passengers,
+                        "transport_mode": "flight",
+                        "depart_time_window": {"start": None, "end": None},
+                    }
+                    if traveler_ids_list:
+                        seg["traveler_ids"] = traveler_ids_list
+                    segs.append(seg)
+            if segs:
+                intent.setdefault("itinerary", {})["segments"] = segs
+                if not trip_type:
+                    intent.setdefault("itinerary", {})["trip_type"] = "multi_city"
+
+        converging = extracted.get("converging_travelers") or []
+        if converging:
+            intent.setdefault("extras", {})["travelers"] = converging
+            intent.setdefault("itinerary", {})["converging"] = True
+            if not trip_type:
+                intent.setdefault("itinerary", {})["trip_type"] = "converging"
+
+        if trip_type == "day_trip":
+            intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = False
 
         if extracted.get("extras"):
-            intent["extras"] = extracted["extras"]
+            for k, v in extracted["extras"].items():
+                if v is not None:
+                    intent.setdefault("extras", {})[k] = v
 
         intent["updated_at"] = int(time.time())
         return intent
 
-    # 2) Retrieval via VectorDB
-    def retrieve(self, intent: Dict[str, Any], k_cases: int = 4, k_facts: int = 4, k_skills: int = 6):
+    # 2) Retrieval via VectorDB - used to inform intent extraction (examples inform intent, not plan)
+    def retrieve(self, query: Union[str, Dict[str, Any]], k_cases: int = 4, k_facts: int = 4, k_skills: int = 6):
+        """Retrieve cases, facts, skills. query can be user message (str) or intent (dict)."""
         print('Retrieving cases, facts and skills from agent experience...')
-        query = intent_to_text(intent)
-        dest = intent_destination(intent)
-        filt = {k: v for k, v in {"destination": dest}.items() if v}
-        cases = self.vdb.search(query=query, kind="case", k=k_cases, filters=filt)
-        facts = self.vdb.search(query=query, kind="fact", k=k_facts, filters=filt)
-        skills = self.vdb.search(query=query, kind="skill", k=k_skills, filters=filt)
+        if isinstance(query, dict):
+            query_str = json.dumps(intent_for_retrieval(query), sort_keys=True, separators=(",", ":"))
+            dest = intent_destination(query)
+            filt = {k: v for k, v in {"destination": dest}.items() if v}
+        else:
+            query_str = str(query).strip()
+            filt = None
+        cases = self.vdb.search(query=query_str, kind="case", k=k_cases, filters=filt)
+        facts = self.vdb.search(query=query_str, kind="fact", k=k_facts, filters=filt)
+        skills = self.vdb.search(query=query_str, kind="skill", k=k_skills, filters=filt)
 
         # LLM skill scoring
         prompt_scores = f"""
@@ -822,9 +1232,9 @@ User message: {user_message}
             Given an intent and a list of candidate skills, score each skill's applicability in [0,1].
             Return JSON: {{"scores": [{{"skill_id": str, "score": float}}]}}
 
-            Intent:
+            Intent/Request:
             ```json
-            {query}
+            {query_str}
             ```
 
             Skills:
@@ -844,170 +1254,6 @@ User message: {user_message}
         
         return {'cases':cases, 'facts':facts, 'skills':skills_ranked}
 
-    # 3) Adapt plan via LLM using multiple example cases, then validate
-    def adapt_from_cases(self, cases: List[Case], intent: Dict[str, Any], facts: List[VDBItem]) -> Plan:
-        print(f'Adapting plan from {len(cases)} example cases...')
-        
-        # Convert cases to example format
-        example_cases = []
-        for case in cases[:3]:  # Use up to 3 example cases
-            example_cases.append({
-                "intent": case.intent_text,
-                "plan_steps": [asdict(s) for s in case.plan.steps]
-            })
-        
-        fact_texts = [{"text": f.text, "meta": f.meta} for f in facts]
-        catalog_summary = [{"name": t.key, "required_args": t.required_args} for t in self.action_catalog]
-        intent_text = intent_to_text(intent)
-        
-        prompt_template = self.prompts.get('adapt_plan', '')
-        if prompt_template:
-            example_cases_json = json.dumps(example_cases, indent=2)
-            fact_texts_json = json.dumps(fact_texts, indent=2)
-            catalog_summary_json = json.dumps(catalog_summary, indent=2)
-            plan_id = uuid.uuid4().hex[:8]
-            
-            
-            replacements = {
-                'intent_text': intent_text,
-                'sig_text': intent_text,
-                'example_cases': example_cases_json,
-                'fact_texts': fact_texts_json,
-                'catalog_summary': catalog_summary_json,
-                'plan_id': plan_id
-            }
-            prompt = self._replace_tokens(prompt_template, replacements)
-        else:
-            prompt = f"""
-            You are a planning agent using case-based reasoning.
-            TASK: ADAPT_PLAN
-            
-            INSTRUCTIONS:
-            1. Study the EXAMPLE CASES below to understand planning patterns and structure
-            2. Analyze the NEW REQUEST (intent) to identify all facts and requirements
-            3. Generate a COMPLETE NEW plan by adapting the example patterns to match the new request's facts
-            
-            ADAPTATION PROCESS:
-            - Extract the structure and sequence from example cases
-            - Replace example values with facts from the new intent
-            - Ensure all requirements from the intent are addressed
-            - Maintain logical flow and dependencies from examples
-            - Adapt step sequences to match the new request's specifics
-            
-            INCORPORATING INTENT FACTS:
-            - Use all information from the intent (segments, party.travelers, stays, preferences, etc.)
-            - Check itinerary.segments for flight legs; itinerary.lodging.stays for hotel stays
-            - For each activity, create appropriate plan steps using available actions
-            - Use dates from segments and stays for timing
-            - Use party.travelers for quantities and participant details
-            - Apply constraints and preferences from the intent
-            - Place activities in chronological order based on dates
-            
-            NEW REQUEST (intent - use these details for all inputs):
-            ```json
-            {intent_text}
-            ```
-            
-            EXAMPLE CASES (learn patterns and structure, NOT specific values):
-            ```json
-            {json.dumps(example_cases, indent=2)}
-            ```
-            
-            RELEVANT FACTS:
-            ```json
-            {json.dumps(fact_texts, indent=2)}
-            ```
-            
-            ACTION CATALOG (ensure inputs match required_args):
-            ```json
-            {json.dumps(catalog_summary, indent=2)}
-            ```
-            
-            OUTPUT FORMAT:
-            Return ONLY JSON with this exact structure:
-            {{
-                "plan": {{
-                    "id": "{uuid.uuid4().hex[:8]}",
-                    "meta": {{"strategy": "adapted"}},
-                    "steps": [
-                        {{
-                            "step_id": 0,
-                            "title": "descriptive title",
-                            "action": "actionName",
-                            "inputs": {{"arg1": "value1", ...}},
-                            "enter_guard": "True",
-                            "success_criteria": "appropriate criteria",
-                            "depends_on": [],
-                            "next_step": 1
-                        }},
-                        {{
-                            "step_id": 1,
-                            "title": "next step title",
-                            "action": "actionName",
-                            "inputs": {{"arg1": "value1", ...}},
-                            "enter_guard": "True",
-                            "success_criteria": "appropriate criteria",
-                            "depends_on": [0],
-                            "next_step": null
-                        }}
-                    ]
-                }}
-            }}
-            
-            STEP STRUCTURE REQUIREMENTS:
-            - step_id: Sequential integer starting from 0 (0, 1, 2, 3, ...)
-            - depends_on: Array of step_id integers that this step depends on
-            - next_step: The step_id of the next step in execution order, or null for the last step
-            - title: Clear, descriptive title for the step
-            - action: Must match an action name from the ACTION CATALOG
-            - inputs: Object with all required_args from the action spec, plus any optional_args
-            - enter_guard: Boolean expression (typically "True")
-            - success_criteria: Expression to evaluate step success
-            
-            CHRONOLOGICAL ORDER (CRITICAL):
-            - Steps MUST be listed in the order they occur in time
-            - step_id values MUST be sequential: 0, 1, 2, 3...
-            - next_step links to the following step (step 0 → 1 → 2 → 3 → null)
-            - Ensure dependencies are satisfied (depends_on steps execute before dependent steps)
-            
-            FINAL VALIDATION BEFORE RETURNING:
-            - Does the plan address ALL requirements from the trip intent?
-            - Are itinerary.segments and lodging.stays represented in plan steps?
-            - Are dates and timing constraints respected?
-            - Is the plan logically complete and executable?
-        """
-        data = self.llm.complete_json(prompt)
-        if not data or "plan" not in data:
-            print('[ERROR] LLM returned invalid plan structure')
-            return Plan(id=uuid.uuid4().hex[:8], steps=[], meta={"strategy": "adapted", "error": "LLM returned invalid plan"})
-        
-        # Create steps
-        steps = []
-        for idx, s in enumerate(data["plan"]["steps"]):
-            if "action" not in s or not s.get("action"):
-                print(f'[WARNING] Step {idx} missing or empty action field! Step data: {s}')
-            # Ensure all required fields are present
-            if "step_id" not in s:
-                s["step_id"] = len(steps)  # Fallback to sequential
-            if "depends_on" not in s:
-                s["depends_on"] = []
-            if "next_step" not in s:
-                s["next_step"] = None
-            try:
-                steps.append(PlanStep(**s))
-            except Exception as e:
-                print(f'[ERROR] Failed to create PlanStep from step {idx}: {e}')
-                print(f'[ERROR] Step data: {json.dumps(s, indent=2, cls=DecimalEncoder)}')
-                continue
-        plan = Plan(id=data["plan"]["id"], steps=steps, meta=data["plan"].get("meta", {}))
-        print('Raw adapted plan:')
-        print(json.dumps({"id": plan.id, "meta": plan.meta, "steps": [asdict(s) for s in plan.steps]}, indent=2, cls=DecimalEncoder))
-        validated_plan = self._validate_and_patch_plan(plan)
-        #print('Validated adapted plan:')
-        #print(json.dumps({"id": validated_plan.id, "meta": validated_plan.meta, "steps": [asdict(s) for s in validated_plan.steps]}, indent=2, cls=DecimalEncoder))
-        return validated_plan
-
-    # 4) Compose plan via LLM with explicit Action Catalog, then validate
     def compose_from_skills(self, intent: Dict[str, Any], skills: List[VDBItem]) -> Plan:
         print('Composing a new plan from scratch based on the user request...')
         catalog = [{
@@ -1017,13 +1263,13 @@ User message: {user_message}
             "optional_args": t.optional_args,
             "success_criteria_hint": t.success_criteria_hint
         } for t in self.action_catalog]
-        intent_text = intent_to_text(intent)
+        intent_json = json.dumps(intent_for_plan(intent), indent=2)
         
-        prompt_template = self.prompts.get('compose_plan', '')
+        prompt_template = self.prompts.get('compose_plan_light', '')
         if prompt_template:
             replacements = {
-                'intent_text': intent_text,
-                'sig_text': intent_text,
+                'intent_text': intent_json,
+                'sig_text': intent_json,
                 'catalog': json.dumps(catalog, indent=2),
                 'skills': json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2),
                 'plan_id': uuid.uuid4().hex[:8]
@@ -1063,7 +1309,7 @@ User message: {user_message}
             
             Intent:
             ```json
-            {intent_text}
+            {intent_json}
             ```
             
             ACTION_CATALOG:
@@ -1144,108 +1390,6 @@ User message: {user_message}
         #print(json.dumps({"id": validated_plan.id, "meta": validated_plan.meta, "steps": [asdict(s) for s in validated_plan.steps]}, indent=2, cls=DecimalEncoder))
         return validated_plan
 
-    # 5) Select best plan via LLM
-    def select_plan(self, intent: Dict[str, Any], candidates: List[Plan]) -> Plan:
-        print('Selecting best plan from list of candidates...')
-        
-        plan_details = []
-        for i, p in enumerate(candidates):
-            step_summaries = []
-            for step in p.steps:
-                step_summaries.append({
-                    "title": step.title,
-                    "action": step.action,
-                    "step_id": step.step_id
-                })
-            plan_details.append({
-                "index": i,
-                "id": p.id,
-                "strategy": p.meta.get("strategy"),
-                "total_steps": len(p.steps),
-                "steps": step_summaries
-            })
-        
-        activities_requested = intent_activities(intent)
-        
-        intent_text = intent_to_text(intent)
-        prompt_template = self.prompts.get('select_best_plan', '')
-        if prompt_template:
-            replacements = {
-                'intent_text': intent_text,
-                'sig_text': intent_text,
-                'activities_requested': json.dumps(activities_requested, indent=2),
-                'plan_details': json.dumps(plan_details, indent=2)
-            }
-            prompt = self._replace_tokens(prompt_template, replacements)
-        else:
-            prompt = f"""
-            You are a meta-planner evaluating candidate plans for completeness and quality.
-            TASK: SELECT_BEST_PLAN
-            
-            Given an intent with requirements and multiple candidate plans, choose the best one.
-            
-            EVALUATION CRITERIA (in order of importance):
-            1. REQUIREMENT COVERAGE: Does the plan address ALL requirements from the intent?
-               - Check itinerary.segments and lodging.stays - each should have corresponding plan steps
-               - Check constraints - all constraints should be respected
-               - Check preferences - preferences should be considered
-               - Missing requirements = incomplete plan
-            
-            2. COMPLETENESS: Is the plan logically complete?
-               - All necessary steps are present
-               - The plan achieves the stated goal
-               - No critical gaps in the execution sequence
-            
-            3. LOGICAL SEQUENCE: Are steps in correct chronological and dependency order?
-               - Steps follow a logical progression
-               - Dependencies are properly established
-               - Timing constraints are respected
-            
-            4. EFFICIENCY: Reasonable number of steps (not too sparse, not redundant)
-               - Plan is neither overly complex nor overly simplistic
-               - Steps are appropriately granular
-            
-            5. ACTION VALIDITY: Are all steps using valid actions with correct inputs?
-               - Actions exist in the action catalog
-               - Required arguments are provided
-               - Input values are appropriate
-            
-            Return ONLY JSON: {{"choice_index": int, "reason": str}}
-            
-            The reason should explicitly state:
-            - Which requirements are covered/missing in the chosen plan
-            - Why this plan is better than the alternatives
-            - Any notable strengths or weaknesses
-
-            Intent (with requirements):
-            ```json
-            {intent_text}
-            ```
-            
-            Activities Requested:
-            ```json
-            {json.dumps(activities_requested, indent=2)}
-            ```
-            
-            Candidate Plans (with step details):
-            ```json
-            {json.dumps(plan_details, indent=2)}
-            ```
-            
-            IMPORTANT:
-            - Prefer plans that cover ALL requirements over those that skip some
-            - Consider both completeness and quality
-            - Choose the plan most likely to successfully achieve the goal
-        """
-        out = self.llm.complete(prompt)
-        print('Candidate selection results:',out)
-        try:
-            data = json.loads(out)
-            idx = max(0, min(len(candidates)-1, int(data.get("choice_index", 0))))
-        except Exception:
-            idx = 0
-        return candidates[idx]
-
     # Validator: ensure known actions + required args are present
     def _validate_and_patch_plan(self, plan: Plan) -> Plan:
         print(f'Validating plan with {len(plan.steps)} steps...')
@@ -1286,37 +1430,194 @@ User message: {user_message}
 
 
 
-    # Orchestrator
+    def _build_plan_from_intent(self, intent: Dict[str, Any], plan_id: str) -> Plan:
+        """
+        Build plan programmatically from intent. Intent is the source of truth.
+        Order: inbound flights → hotels (one per stay) → return flights.
+        Extensible: add activities, tours, restaurants when intent has them and actions exist.
+        """
+        def _code(v) -> str:
+            if isinstance(v, dict):
+                return v.get("code") or ""
+            return str(v) if v else ""
+
+        iti = intent.get("itinerary") or {}
+        segs = iti.get("segments") or []
+        lod = iti.get("lodging") or {}
+        stays_list = lod.get("stays") or []
+        party = intent.get("party") or {}
+        travelers = party.get("travelers") or {}
+        default_pax = int(travelers.get("adults", 0) or 0) + int(travelers.get("children", 0) or 0) + int(travelers.get("infants", 0) or 0) or 1
+
+        dest_code = _code(segs[0].get("destination")) if segs else None
+        last_dest = (stays_list[-1].get("location_code") if stays_list else None) or dest_code
+        if isinstance(last_dest, dict):
+            last_dest = last_dest.get("code") if last_dest else None
+        last_dest = str(last_dest or "").upper() or (str(dest_code or "").upper() if dest_code else "")
+
+        inbound: List[Dict] = []
+        return_segs: List[Dict] = []
+        intermediate: List[Dict] = []
+        for seg in segs:
+            d = _code(seg.get("destination"))
+            o = _code(seg.get("origin"))
+            if dest_code and d and str(d).upper() == str(dest_code).upper():
+                inbound.append(seg)
+            elif last_dest and o and str(o).upper() == str(last_dest).upper():
+                return_segs.append(seg)
+            else:
+                intermediate.append(seg)
+        if not inbound and not return_segs and segs:
+            inbound = list(segs)
+
+        steps: List[PlanStep] = []
+        leg = 0
+
+        for seg in inbound:
+            o_code = _code(seg.get("origin"))
+            d_code = _code(seg.get("destination"))
+            dep = seg.get("depart_date")
+            pax = seg.get("passengers", default_pax)
+            tids = seg.get("traveler_ids") or []
+            if o_code and d_code and dep:
+                steps.append(PlanStep(
+                    step_id=len(steps),
+                    title=f"{o_code} to {d_code} flight",
+                    action="quote_flight",
+                    inputs={
+                        "from_airport_code": o_code,
+                        "to_airport_code": d_code,
+                        "departure_date": dep,
+                        "leg": leg,
+                        "passengers": pax,
+                        "traveler_ids": tids,
+                    },
+                    enter_guard="True",
+                    success_criteria="len(result) > 0",
+                    depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                    next_step=None,
+                ))
+                leg += 1
+
+        prev_stay_loc = None
+        for stay in stays_list:
+            loc = stay.get("location_code") or dest_code
+            loc_code = (_code(loc) if isinstance(loc, dict) else str(loc or "").upper()) or (str(dest_code or "").upper() if dest_code else "")
+            ci = stay.get("check_in")
+            co = stay.get("check_out")
+            n_guests = stay.get("number_of_guests", default_pax)
+            tids = stay.get("traveler_ids") or []
+            if not loc or not ci or not co:
+                continue
+            if prev_stay_loc and loc_code and str(loc_code).upper() != str(prev_stay_loc).upper():
+                for seg in intermediate:
+                    o = _code(seg.get("origin"))
+                    d = _code(seg.get("destination"))
+                    if str(o).upper() == str(prev_stay_loc).upper() and str(d).upper() == str(loc_code).upper():
+                        dep = seg.get("depart_date")
+                        pax = seg.get("passengers", default_pax)
+                        seg_tids = seg.get("traveler_ids") or []
+                        if o and d and dep:
+                            steps.append(PlanStep(
+                                step_id=len(steps),
+                                title=f"{o} to {d} flight",
+                                action="quote_flight",
+                                inputs={
+                                    "from_airport_code": o,
+                                    "to_airport_code": d,
+                                    "departure_date": dep,
+                                    "leg": leg,
+                                    "passengers": pax,
+                                    "traveler_ids": seg_tids,
+                                },
+                                enter_guard="True",
+                                success_criteria="len(result) > 0",
+                                depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                                next_step=None,
+                            ))
+                            leg += 1
+                        break
+            prev_stay_loc = loc_code
+            try:
+                from datetime import datetime
+                ci_dt = datetime.strptime(str(ci)[:10], "%Y-%m-%d")
+                co_dt = datetime.strptime(str(co)[:10], "%Y-%m-%d")
+                nights = max(1, (co_dt - ci_dt).days)
+            except Exception:
+                nights = 1
+            n_guests_str = str(n_guests) if isinstance(n_guests, (int, float)) else n_guests
+            steps.append(PlanStep(
+                step_id=len(steps),
+                title=f"{loc} hotel {nights} nights ({n_guests_str} guests)",
+                action="quote_hotel",
+                inputs={
+                    "city": loc,
+                    "area": None,
+                    "check_in_date": ci,
+                    "number_of_nights": str(nights),
+                    "number_of_guests": n_guests_str,
+                    "traveler_ids": tids,
+                },
+                enter_guard="True",
+                success_criteria="len(result) > 0",
+                depends_on=[len(steps) - 1] if steps else [],
+                next_step=None,
+            ))
+
+        for seg in return_segs:
+            o_code = _code(seg.get("origin"))
+            d_code = _code(seg.get("destination"))
+            dep = seg.get("depart_date")
+            pax = seg.get("passengers", default_pax)
+            tids = seg.get("traveler_ids") or []
+            if o_code and d_code and dep:
+                steps.append(PlanStep(
+                    step_id=len(steps),
+                    title=f"{o_code} to {d_code} flight",
+                    action="quote_flight",
+                    inputs={
+                        "from_airport_code": o_code,
+                        "to_airport_code": d_code,
+                        "departure_date": dep,
+                        "leg": leg,
+                        "passengers": pax,
+                        "traveler_ids": tids,
+                    },
+                    enter_guard="True",
+                    success_criteria="len(result) > 0",
+                    depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                    next_step=None,
+                ))
+                leg += 1
+
+        for i, step in enumerate(steps):
+            step.step_id = i
+            step.next_step = None if i == len(steps) - 1 else i + 1
+            step.depends_on = [i - 1] if i > 0 else []
+
+        return Plan(id=plan_id, steps=steps, meta={"strategy": "programmatic"})
+
+    # Light plan generation: intent → plan (programmatic; no LLM)
+    def compose_plan_light(self, intent: Dict[str, Any]) -> Plan:
+        """Build plan from intent programmatically. Intent is the source of truth."""
+        plan_id = uuid.uuid4().hex[:8]
+        plan = self._build_plan_from_intent(intent, plan_id)
+        return self._validate_and_patch_plan(plan)
+
+    # Orchestrator - plan is reflection of intent (no examples needed; intent is explicit)
     def propose(self, intent: Dict[str, Any]) -> Dict[str, Any]:
         function = 'propose'
-        print('Initiating planning process from intent...')
-        print('Intent (preview):', intent_to_text(intent)[:200])
-        
-        retrieved = self.retrieve(intent)
-        if not retrieved:
-            return {'success': False, 'function': function, 'input': intent, 'output': 'Could not retrieve'}
-        
-        cases = retrieved['cases']
-        facts = retrieved['facts']
-        skills = retrieved['skills']
+        print('Generating plan from intent (light)...')
+        print('Intent (preview):', json.dumps(intent_for_retrieval(intent))[:200])
 
-        candidate_plans: List[Plan] = []
-        if cases:
-            case_objects = [self._vdb_case_to_case(c) for c in cases[:3]]
-            adapted = self.adapt_from_cases(case_objects, intent, facts)
-            candidate_plans.append(adapted)
-        composed = self.compose_from_skills(intent, skills[:4])
-        candidate_plans.append(composed)
-
-        final = self.select_plan(intent, candidate_plans)
-
+        plan = self.compose_plan_light(intent)
         return {
             "function": "propose",
             "success": True,
             "input": intent,
             "output": {
                 "intent": intent,
-                "plan": asdict(final),
+                "plan": asdict(plan),
             }
         }
 
@@ -1376,13 +1677,11 @@ class GeneratePlan:
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
-        Returns a dictionary with keys: 'to_intent', 'adapt_plan', 'compose_plan', 'select_best_plan'
+        Returns a dictionary with keys: 'to_intent', 'compose_plan_light'
         """
         prompts = {
             'to_intent': '',
-            'adapt_plan': '',
-            'compose_plan': '',
-            'select_best_plan': ''
+            'compose_plan_light': ''
         }
         
         try:
@@ -1418,12 +1717,8 @@ class GeneratePlan:
                     # Map keys to prompt types using exact match only
                     if key == 'to_intent':
                         prompts['to_intent'] = prompt_text
-                    elif key == 'adapt_plan':
-                        prompts['adapt_plan'] = prompt_text
-                    elif key == 'compose_plan':
-                        prompts['compose_plan'] = prompt_text
-                    elif key == 'select_best_plan':
-                        prompts['select_best_plan'] = prompt_text
+                    elif key == 'compose_plan_light':
+                        prompts['compose_plan_light'] = prompt_text
         except Exception as e:
             print(f'Warning: Could not load prompts from database: {str(e)}')
             
@@ -1736,14 +2031,19 @@ class GeneratePlan:
                 plan_actions=plan_actions
             )
             print('Finished building Plan Generator')
-            
+
             user_message = payload.get("message", "").strip()
             req = {"request": user_message, "message": user_message}
+
             
-            intent = planner.to_intent(req)
+            # Step 1: Generate Intent
+            
+            retrieved = planner.retrieve(user_message, k_cases=4, k_facts=4, k_skills=6)
+            intent = planner.to_intent(req, cases=retrieved.get('cases', []),
+                                       facts=retrieved.get('facts', []), skills=retrieved.get('skills', []))
             if not intent:
                 return {'success': False, 'function': function, 'input': payload, 'output': 'Intent could not be extracted'}
-            
+
             self.AGU.mutate_workspace(
                 {'request_intent': intent},
                 public_user=public_user,
@@ -1751,11 +2051,25 @@ class GeneratePlan:
             )
             print('Intent stored in workspace')
             
-            response_1 = planner.propose(intent)
-            results.append(response_1)
-            if not response_1['success']:
-                return {'success': False, 'output': results}
             
+            # Step 2: Generate Plan
+
+            from pes.handlers.propose_plan import ProposePlan
+            propose_payload = {
+                'portfolio': context.portfolio,
+                'org': context.org,
+                'case_group': context.case_group,
+                'intent': intent,
+                '_init': context.init,
+                '_entity_type': entity_type,
+                '_entity_id': entity_id,
+                '_thread': thread,
+            }
+            response_1 = ProposePlan().run(propose_payload)
+            results.append(response_1)
+            if not response_1.get('success'):
+                return {'success': False, 'output': results}
+
             canonical = results[-1]['output']
             return {'success': True, 'interface': 'plan', 'input': payload, 'output': canonical, 'stack': results}
             

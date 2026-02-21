@@ -12,8 +12,11 @@ This directory contains seed cases that can be inserted into the database for th
 
 The intent schema is domain-agnostic. For travel, it uses:
 
-- **`itinerary.segments`** - Flight legs: `[{ origin: {code}, destination: {code}, depart_date }]`
-- **`itinerary.lodging.stays`** - Hotel stays: `[{ location_code, check_in, check_out }]`
+- **`party.traveler_ids`** - List of provisional traveler IDs (t1, t2, ...)
+- **`party.travelers_by_id`** - Dict keyed by traveler_id with group_index, origin, arrival_date (for converging)
+- **`itinerary.segments`** - Flight legs: `[{ origin, destination, depart_date, passengers, traveler_ids }]`
+- **`itinerary.lodging.stays`** - Hotel stays: `[{ location_code, check_in, check_out, number_of_guests, traveler_ids }]`
+  - For converging trips: one stay per traveler group (each with own check_in, check_out, number_of_guests)
 - **`party.travelers`** - `{ adults, children, infants }`
 - **`extras.activities`** - Domain-specific activities (conference, meeting, leisure, etc.)
 - **`preferences`** - `{ flight: {}, hotel: {} }`
@@ -42,7 +45,7 @@ Each case in the database should have the following structure:
 
 - **`id`**: Unique identifier for the case (e.g., "seed_case_001")
 - **`text`**: JSON string containing:
-  - `intent`: A JSON string (compact format, as returned by `intent_to_text()`)
+  - `intent`: A JSON string (compact format, as returned by `json.dumps(intent_for_retrieval(intent))`)
   - `plan`: An object with a `steps` array containing plan steps
 - **`meta`**: Metadata object for filtering and searching cases
 
@@ -114,7 +117,7 @@ for case in cases:
 ## Notes
 
 - The `intent` field in the `text` JSON string is itself a JSON string (double-encoded)
-- This matches the format used by `intent_to_text()` which returns a compact JSON string
+- This matches the format used by `intent_for_retrieval()` which returns a dict; serialize with `json.dumps()` when needed
 - The `plan.steps` array contains all the plan steps with their actions, inputs, and dependencies
 - Metadata fields can be used for filtering cases by destination, type, season, or purpose
 

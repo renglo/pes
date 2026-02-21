@@ -1,7 +1,107 @@
 [
   {
     "id": "seed_case_001",
-    "text": "{\"intent\":\"{\\\"constraints\\\":{\\\"budget_total\\\":null,\\\"currency\\\":\\\"USD\\\",\\\"refundable_preference\\\":\\\"either\\\"},\\\"party\\\":{\\\"travelers\\\":{\\\"adults\\\":2,\\\"children\\\":0,\\\"infants\\\":0}},\\\"preferences\\\":{\\\"flight\\\":{},\\\"hotel\\\":{\\\"central_location\\\":true,\\\"wifi\\\":true}},\\\"segments\\\":[{\\\"depart_date\\\":\\\"2026-07-15\\\",\\\"destination\\\":\\\"JFK\\\",\\\"origin\\\":\\\"BOS\\\"},{\\\"depart_date\\\":\\\"2026-07-20\\\",\\\"destination\\\":\\\"BOS\\\",\\\"origin\\\":\\\"JFK\\\"}],\\\"stays\\\":[{\\\"check_in\\\":\\\"2026-07-15\\\",\\\"check_out\\\":\\\"2026-07-20\\\",\\\"location_code\\\":\\\"NYC\\\"}],\\\"trip_type\\\":\\\"round_trip\\\"}\",\"plan\":{\"steps\":[{\"step_id\":0,\"title\":\"Boston to NYC flight\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"BOS\",\"to_airport_code\":\"JFK\",\"departure_date\":\"2026-07-15\",\"passengers\":2},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":1},{\"step_id\":1,\"title\":\"Find Midtown business hotel\",\"action\":\"quote_hotel\",\"inputs\":{\"city\":\"New York City\",\"area\":\"Midtown Manhattan\",\"budget\":\"mid\",\"check_in_date\":\"2026-07-15\",\"number_of_nights\":5},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":2},{\"step_id\":2,\"title\":\"Reserve bikes for leisure\",\"action\":\"rent_bike\",\"inputs\":{\"rider_count\":2,\"pickup_area\":\"Central Park\"},\"enter_guard\":\"True\",\"success_criteria\":\"result.get('confirmed') == True\",\"depends_on\":[],\"next_step\":3},{\"step_id\":3,\"title\":\"NYC to Boston flight\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"JFK\",\"to_airport_code\":\"BOS\",\"departure_date\":\"2026-07-20\",\"passengers\":2},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":null}]}}",
+    "text": "I need to fly from Boston to NYC for a business conference July 15-20, 2 people, mid-range hotel in Midtown, and we'd like to rent bikes for recreation in Central Park",
+    "intent": {
+      "schema": "renglo.intent.v1",
+      "intent_id": "seed_case_001",
+      "request": {
+        "user_message": "Business conference in NYC with bike rental for recreation",
+        "locale": "en-US",
+        "timezone": "America/New_York",
+        "now_iso": null,
+        "now_date": null
+      },
+      "party": {
+        "travelers": {
+          "adults": 2,
+          "children": 0,
+          "infants": 0
+        },
+        "traveler_profile_ids": [],
+        "guests": [],
+        "contact": {
+          "email": null,
+          "phone": null
+        }
+      },
+      "itinerary": {
+        "trip_type": "round_trip",
+        "segments": [
+          {
+            "origin": {
+              "type": "airport",
+              "code": "BOS"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "JFK"
+            },
+            "depart_date": "2026-07-15",
+            "transport_mode": "flight"
+          },
+          {
+            "origin": {
+              "type": "airport",
+              "code": "JFK"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "BOS"
+            },
+            "depart_date": "2026-07-20",
+            "transport_mode": "flight"
+          }
+        ],
+        "day_trips": [],
+        "converging": false,
+        "lodging": {
+          "needed": true,
+          "check_in": "2026-07-15",
+          "check_out": "2026-07-20",
+          "location_hint": "NYC",
+          "stays": [
+            {
+              "location_code": "NYC",
+              "check_in": "2026-07-15",
+              "check_out": "2026-07-20"
+            }
+          ]
+        },
+        "ground": {
+          "needed": false
+        }
+      },
+      "preferences": {
+        "flight": {},
+        "hotel": {
+          "central_location": true,
+          "wifi": true
+        }
+      },
+      "constraints": {
+        "budget_total": null,
+        "currency": "USD",
+        "refundable_preference": "either"
+      },
+      "extras": {
+        "origin": "Boston",
+        "purpose": "conference",
+        "season": "summer",
+        "activities": [
+          {
+            "description": "business conference attendance",
+            "location": "NYC",
+            "type": "conference"
+          },
+          {
+            "description": "bike rental for recreation",
+            "location": "Central Park",
+            "type": "leisure"
+          }
+        ]
+      }
+    },
     "meta": {
       "destination": "NYC",
       "case_type": "single_destination",
@@ -11,7 +111,124 @@
   },
   {
     "id": "seed_case_002",
-    "text": "{\"intent\":\"{\\\"constraints\\\":{\\\"budget_total\\\":null,\\\"currency\\\":\\\"USD\\\",\\\"refundable_preference\\\":\\\"either\\\"},\\\"party\\\":{\\\"travelers\\\":{\\\"adults\\\":1,\\\"children\\\":0,\\\"infants\\\":0}},\\\"preferences\\\":{\\\"flight\\\":{},\\\"hotel\\\":{\\\"airport_proximity\\\":true,\\\"business_center\\\":true}},\\\"segments\\\":[{\\\"depart_date\\\":\\\"2026-12-20\\\",\\\"destination\\\":\\\"JFK\\\",\\\"origin\\\":\\\"ORD\\\"},{\\\"depart_date\\\":\\\"2026-12-23\\\",\\\"destination\\\":\\\"DCA\\\",\\\"origin\\\":\\\"JFK\\\"},{\\\"depart_date\\\":\\\"2026-12-27\\\",\\\"destination\\\":\\\"ORD\\\",\\\"origin\\\":\\\"DCA\\\"}],\\\"stays\\\":[{\\\"check_in\\\":\\\"2026-12-20\\\",\\\"check_out\\\":\\\"2026-12-23\\\",\\\"location_code\\\":\\\"NYC\\\"},{\\\"check_in\\\":\\\"2026-12-23\\\",\\\"check_out\\\":\\\"2026-12-27\\\",\\\"location_code\\\":\\\"Washington DC\\\"}],\\\"trip_type\\\":\\\"multi_city\\\"}\",\"plan\":{\"steps\":[{\"step_id\":0,\"title\":\"Flight from Chicago to NYC\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"ORD\",\"to_airport_code\":\"JFK\",\"departure_date\":\"2026-12-20\",\"passengers\":1},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":1},{\"step_id\":1,\"title\":\"Book NYC hotel\",\"action\":\"quote_hotel\",\"inputs\":{\"city\":\"New York City\",\"area\":\"Midtown Manhattan\",\"budget\":\"high\",\"check_in_date\":\"2026-12-20\",\"number_of_nights\":3},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":2},{\"step_id\":2,\"title\":\"Flight from NYC to Washington DC\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"JFK\",\"to_airport_code\":\"DCA\",\"departure_date\":\"2026-12-23\",\"passengers\":1},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":3},{\"step_id\":3,\"title\":\"Book DC hotel\",\"action\":\"quote_hotel\",\"inputs\":{\"city\":\"Washington DC\",\"area\":\"Downtown DC\",\"budget\":\"high\",\"check_in_date\":\"2026-12-23\",\"number_of_nights\":4},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":4},{\"step_id\":4,\"title\":\"Flight from Washington DC to Chicago\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"DCA\",\"to_airport_code\":\"ORD\",\"departure_date\":\"2026-12-27\",\"passengers\":1},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":null}]}}",
+    "text": "Multi-city business trip: Chicago to NYC Dec 20-23, then NYC to Washington DC Dec 23-27, then back to Chicago. One traveler, high-end hotels near airports with business centers",
+    "intent": {
+      "schema": "renglo.intent.v1",
+      "intent_id": "seed_case_002",
+      "request": {
+        "user_message": "Multi-city business meetings in NYC and Washington DC",
+        "locale": "en-US",
+        "timezone": "America/New_York",
+        "now_iso": null,
+        "now_date": null
+      },
+      "party": {
+        "travelers": {
+          "adults": 1,
+          "children": 0,
+          "infants": 0
+        },
+        "traveler_profile_ids": [],
+        "guests": [],
+        "contact": {
+          "email": null,
+          "phone": null
+        }
+      },
+      "itinerary": {
+        "trip_type": "multi_city",
+        "segments": [
+          {
+            "origin": {
+              "type": "airport",
+              "code": "ORD"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "JFK"
+            },
+            "depart_date": "2026-12-20",
+            "transport_mode": "flight"
+          },
+          {
+            "origin": {
+              "type": "airport",
+              "code": "JFK"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "DCA"
+            },
+            "depart_date": "2026-12-23",
+            "transport_mode": "flight"
+          },
+          {
+            "origin": {
+              "type": "airport",
+              "code": "DCA"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "ORD"
+            },
+            "depart_date": "2026-12-27",
+            "transport_mode": "flight"
+          }
+        ],
+        "day_trips": [],
+        "converging": false,
+        "lodging": {
+          "needed": true,
+          "check_in": null,
+          "check_out": null,
+          "location_hint": null,
+          "stays": [
+            {
+              "location_code": "NYC",
+              "check_in": "2026-12-20",
+              "check_out": "2026-12-23"
+            },
+            {
+              "location_code": "Washington DC",
+              "check_in": "2026-12-23",
+              "check_out": "2026-12-27"
+            }
+          ]
+        },
+        "ground": {
+          "needed": false
+        }
+      },
+      "preferences": {
+        "flight": {},
+        "hotel": {
+          "airport_proximity": true,
+          "business_center": true
+        }
+      },
+      "constraints": {
+        "budget_total": null,
+        "currency": "USD",
+        "refundable_preference": "either"
+      },
+      "extras": {
+        "origin": "Chicago",
+        "purpose": "client_meetings",
+        "season": "winter",
+        "activities": [
+          {
+            "description": "client meetings",
+            "location": "NYC",
+            "type": "meeting"
+          },
+          {
+            "description": "client meetings",
+            "location": "Washington DC",
+            "type": "meeting"
+          }
+        ]
+      }
+    },
     "meta": {
       "destination": "NYC,Washington DC",
       "case_type": "multi_city",
@@ -21,7 +238,114 @@
   },
   {
     "id": "seed_case_003",
-    "text": "{\"intent\":\"{\\\"constraints\\\":{\\\"budget_total\\\":null,\\\"currency\\\":\\\"USD\\\",\\\"refundable_preference\\\":\\\"either\\\"},\\\"party\\\":{\\\"travelers\\\":{\\\"adults\\\":1,\\\"children\\\":0,\\\"infants\\\":0}},\\\"preferences\\\":{\\\"flight\\\":{},\\\"hotel\\\":{\\\"public_transit\\\":true,\\\"tech_hub_location\\\":true}},\\\"segments\\\":[{\\\"depart_date\\\":\\\"2026-04-10\\\",\\\"destination\\\":\\\"SFO\\\",\\\"origin\\\":\\\"SEA\\\"},{\\\"depart_date\\\":\\\"2026-04-14\\\",\\\"destination\\\":\\\"SEA\\\",\\\"origin\\\":\\\"SFO\\\"}],\\\"stays\\\":[{\\\"check_in\\\":\\\"2026-04-10\\\",\\\"check_out\\\":\\\"2026-04-14\\\",\\\"location_code\\\":\\\"San Francisco\\\"}],\\\"trip_type\\\":\\\"round_trip\\\"}\",\"plan\":{\"steps\":[{\"step_id\":0,\"title\":\"Flight from Seattle to SF\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"SEA\",\"to_airport_code\":\"SFO\",\"departure_date\":\"2026-04-10\",\"passengers\":1},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":1},{\"step_id\":1,\"title\":\"Book SOMA district hotel\",\"action\":\"quote_hotel\",\"inputs\":{\"city\":\"San Francisco\",\"area\":\"SOMA District\",\"budget\":\"mid\",\"check_in_date\":\"2026-04-10\",\"number_of_nights\":4},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":2},{\"step_id\":2,\"title\":\"Plan efficient route to venue\",\"action\":\"map_route\",\"inputs\":{\"max_minutes\":30,\"avoid_hills\":true},\"enter_guard\":\"True\",\"success_criteria\":\"\",\"depends_on\":[],\"next_step\":3},{\"step_id\":3,\"title\":\"Reserve bike for transportation\",\"action\":\"rent_bike\",\"inputs\":{\"rider_count\":1,\"pickup_area\":\"SOMA\"},\"enter_guard\":\"True\",\"success_criteria\":\"result.get('confirmed') == True\",\"depends_on\":[],\"next_step\":4},{\"step_id\":4,\"title\":\"Flight from SF to Seattle\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"SFO\",\"to_airport_code\":\"SEA\",\"departure_date\":\"2026-04-14\",\"passengers\":1},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":null}]}}",
+    "text": "Tech conference in San Francisco April 10-14, flying from Seattle. Need a hotel in SOMA, bike rental for getting around, and route planning to the venue (avoid hills)",
+    "intent": {
+      "schema": "renglo.intent.v1",
+      "intent_id": "seed_case_003",
+      "request": {
+        "user_message": "Tech conference in San Francisco with bike rental and route planning",
+        "locale": "en-US",
+        "timezone": "America/New_York",
+        "now_iso": null,
+        "now_date": null
+      },
+      "party": {
+        "travelers": {
+          "adults": 1,
+          "children": 0,
+          "infants": 0
+        },
+        "traveler_profile_ids": [],
+        "guests": [],
+        "contact": {
+          "email": null,
+          "phone": null
+        }
+      },
+      "itinerary": {
+        "trip_type": "round_trip",
+        "segments": [
+          {
+            "origin": {
+              "type": "airport",
+              "code": "SEA"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "SFO"
+            },
+            "depart_date": "2026-04-10",
+            "transport_mode": "flight"
+          },
+          {
+            "origin": {
+              "type": "airport",
+              "code": "SFO"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "SEA"
+            },
+            "depart_date": "2026-04-14",
+            "transport_mode": "flight"
+          }
+        ],
+        "day_trips": [],
+        "converging": false,
+        "lodging": {
+          "needed": true,
+          "check_in": "2026-04-10",
+          "check_out": "2026-04-14",
+          "location_hint": "San Francisco",
+          "stays": [
+            {
+              "location_code": "San Francisco",
+              "check_in": "2026-04-10",
+              "check_out": "2026-04-14"
+            }
+          ]
+        },
+        "ground": {
+          "needed": false
+        }
+      },
+      "preferences": {
+        "flight": {},
+        "hotel": {
+          "public_transit": true,
+          "tech_hub_location": true
+        }
+      },
+      "constraints": {
+        "budget_total": null,
+        "currency": "USD",
+        "refundable_preference": "either"
+      },
+      "extras": {
+        "origin": "Seattle",
+        "purpose": "conference",
+        "season": "spring",
+        "activities": [
+          {
+            "description": "tech conference attendance",
+            "location": "SOMA District",
+            "type": "conference"
+          },
+          {
+            "description": "bike rental for transportation",
+            "location": "SOMA",
+            "type": "leisure"
+          },
+          {
+            "description": "efficient route to venue",
+            "preferences": [
+              "avoid_hills"
+            ],
+            "type": "route_planning"
+          }
+        ]
+      }
+    },
     "meta": {
       "destination": "San Francisco",
       "case_type": "single_destination",
@@ -31,7 +355,97 @@
   },
   {
     "id": "seed_case_004",
-    "text": "{\"intent\":\"{\\\"constraints\\\":{\\\"budget_total\\\":null,\\\"currency\\\":\\\"USD\\\",\\\"refundable_preference\\\":\\\"either\\\"},\\\"party\\\":{\\\"travelers\\\":{\\\"adults\\\":3,\\\"children\\\":0,\\\"infants\\\":0}},\\\"preferences\\\":{\\\"flight\\\":{},\\\"hotel\\\":{\\\"quick_turnaround\\\":true}},\\\"segments\\\":[{\\\"depart_date\\\":\\\"2026-06-15\\\",\\\"destination\\\":\\\"LIM\\\",\\\"origin\\\":\\\"GRU\\\"},{\\\"depart_date\\\":\\\"2026-06-15\\\",\\\"destination\\\":\\\"GRU\\\",\\\"origin\\\":\\\"LIM\\\"}],\\\"trip_type\\\":\\\"day_trip\\\"}\",\"plan\":{\"steps\":[{\"step_id\":0,\"title\":\"Sao Paulo to Lima morning flight\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"GRU\",\"to_airport_code\":\"LIM\",\"departure_date\":\"2026-06-15\",\"passengers\":3},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":1},{\"step_id\":1,\"title\":\"Lima to Sao Paulo evening flight\",\"action\":\"quote_flight\",\"inputs\":{\"from_airport_code\":\"LIM\",\"to_airport_code\":\"GRU\",\"departure_date\":\"2026-06-15\",\"passengers\":3},\"enter_guard\":\"True\",\"success_criteria\":\"len(result) > 0\",\"depends_on\":[],\"next_step\":null}]}}",
+    "text": "Same-day client meeting in Lima, flying from Sao Paulo. Three of us, morning flight there and evening flight back. No hotel needed.",
+    "intent": {
+      "schema": "renglo.intent.v1",
+      "intent_id": "seed_case_004",
+      "request": {
+        "user_message": "Same-day client meeting in Lima, return to Sao Paulo",
+        "locale": "en-US",
+        "timezone": "America/New_York",
+        "now_iso": null,
+        "now_date": null
+      },
+      "party": {
+        "travelers": {
+          "adults": 3,
+          "children": 0,
+          "infants": 0
+        },
+        "traveler_profile_ids": [],
+        "guests": [],
+        "contact": {
+          "email": null,
+          "phone": null
+        }
+      },
+      "itinerary": {
+        "trip_type": "day_trip",
+        "segments": [
+          {
+            "origin": {
+              "type": "airport",
+              "code": "GRU"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "LIM"
+            },
+            "depart_date": "2026-06-15",
+            "transport_mode": "flight"
+          },
+          {
+            "origin": {
+              "type": "airport",
+              "code": "LIM"
+            },
+            "destination": {
+              "type": "airport",
+              "code": "GRU"
+            },
+            "depart_date": "2026-06-15",
+            "transport_mode": "flight"
+          }
+        ],
+        "day_trips": [],
+        "converging": false,
+        "lodging": {
+          "needed": false,
+          "check_in": null,
+          "check_out": null,
+          "location_hint": null,
+          "stays": []
+        },
+        "ground": {
+          "needed": false
+        }
+      },
+      "preferences": {
+        "flight": {},
+        "hotel": {
+          "quick_turnaround": true
+        }
+      },
+      "constraints": {
+        "budget_total": null,
+        "currency": "USD",
+        "refundable_preference": "either"
+      },
+      "extras": {
+        "origin": "Sao Paulo",
+        "purpose": "client_meeting",
+        "season": "all_year",
+        "trip_type": "day_trip",
+        "venue": "Downtown Lima Conference Center",
+        "activities": [
+          {
+            "description": "client meeting",
+            "location": "Downtown Lima Conference Center",
+            "type": "meeting"
+          }
+        ]
+      }
+    },
     "meta": {
       "destination": "Lima",
       "case_type": "day_trip",
