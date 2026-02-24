@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple, Protocol, Union
 import copy
+import importlib.resources
 import json
 import math
 import re
@@ -9,6 +10,12 @@ import time
 import uuid
 import os
 from openai import OpenAI
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 from collections import Counter
 from decimal import Decimal
 from datetime import datetime
@@ -1724,6 +1731,56 @@ class GeneratePlan:
             
         
         return prompts
+
+    def _load_prompts_from_package(self, package_route: str) -> Dict[str, str]:
+        """
+        Load prompts from a Python package using importlib.resources.
+        Works regardless of filesystem location (installed package, zip, etc.).
+
+        Args:
+            package_route: Dotted path to the package subdirectory containing prompt YAML files.
+                          Example: 'noma.prompts.pes' loads from noma/prompts/pes/*.yaml
+
+        Returns:
+            Dictionary with keys: 'to_intent', 'compose_plan_light'
+        """
+        prompts = {
+            'to_intent': '',
+            'compose_plan_light': ''
+        }
+        if not yaml:
+            print('Warning: PyYAML not installed. Cannot load prompts from package.')
+            return prompts
+        try:
+            parts = package_route.split('.')
+            if not parts:
+                raise ValueError('package_route must be non-empty (e.g. noma.prompts.pes)')
+            package_name = parts[0]
+            path_parts = parts[1:] if len(parts) > 1 else []
+            resource_root = importlib.resources.files(package_name)
+            for p in path_parts:
+                resource_root = resource_root / p
+            if not resource_root.is_dir():
+                raise FileNotFoundError(f'Package resource path does not exist: {package_route}')
+            for entry in resource_root.iterdir():
+                if entry.name.endswith('.yaml') or entry.name.endswith('.yml'):
+                    try:
+                        with importlib.resources.as_file(entry) as f:
+                            with open(f, 'r') as fp:
+                                raw = yaml.safe_load(fp)
+                        if not isinstance(raw, dict):
+                            continue
+                        key = (raw.get('key') or '').lower()
+                        prompt_text = raw.get('prompt', '') or ''
+                        if prompt_text:
+                            prompt_text = prompt_text.lstrip()
+                        if key in prompts:
+                            prompts[key] = prompt_text
+                    except Exception as e:
+                        print(f'Warning: Could not load prompt from {entry.name}: {e}')
+        except Exception as e:
+            print(f'Warning: Could not load prompts from package {package_route}: {e}')
+        return prompts
     
     def _load_actions(self, portfolio: str, org: str, action_ring: str = "schd_actions") -> List[ActionSpec]:
         """
@@ -1891,11 +1948,15 @@ class GeneratePlan:
         context = self._get_context()
         case_group = context.case_group if context else None
         
-        # Use prompts from initialization if available, otherwise load from database
+        # Use prompts from initialization if available, otherwise load from database or package
         if self.prompts:
             prompts = self.prompts
         else:
-            prompts = self._load_prompts(portfolio, org, prompt_ring, case_group=case_group)
+            prompt_route = (context.init or {}).get('prompt_route') if context and isinstance(context.init, dict) else None
+            if prompt_route:
+                prompts = self._load_prompts_from_package(prompt_route)
+            else:
+                prompts = self._load_prompts(portfolio, org, prompt_ring, case_group=case_group)
         
         # Load actions from database
         action_catalog = self._load_actions(portfolio, org, action_ring)
