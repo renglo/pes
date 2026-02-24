@@ -506,6 +506,9 @@ class ModifyPlan:
         Returns:
             Dictionary with keys: 'to_intent', 'modify_intent_delta', 'compose_plan_light', 'modify_plan'
         """
+        
+        print('Using prompts from package')
+        
         prompts = {
             'to_intent': '',
             'modify_intent_delta': '',

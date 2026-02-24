@@ -1028,6 +1028,46 @@ User message: {user_message}
                                     if seg_tids:
                                         seg["traveler_ids"] = seg_tids
                                     segs.append(seg)
+            # For single_destination/round_trip: add return segment to intent if not already present
+            if not converging and segs and trip_type in ("single_destination", "round_trip"):
+                dest_code = (segs[0].get("destination") or {}).get("code") if segs else None
+                orig_code = (segs[0].get("origin") or {}).get("code") if segs else None
+                if isinstance(orig_code, dict):
+                    orig_code = orig_code.get("code") if orig_code else None
+                if isinstance(dest_code, dict):
+                    dest_code = dest_code.get("code") if dest_code else None
+                has_return = any(
+                    str((s.get("origin") or {}).get("code") or (s.get("origin") if isinstance(s.get("origin"), str) else "") or "").upper() == str(dest_code or "").upper()
+                    for s in segs
+                )
+                if not has_return and dest_code and orig_code:
+                    ret_date = clamp_date(dates.get("return_date")) or clamp_date(lod.get("check_out"))
+                    if not ret_date and (lod.get("stays") or extracted.get("stays")):
+                        sts = lod.get("stays") or extracted.get("stays") or []
+                        s0 = sts[0] if sts else {}
+                        ret_date = clamp_date(s0.get("check_out"))
+                    if not ret_date and lod.get("check_in") and lod.get("number_of_nights"):
+                        try:
+                            from datetime import datetime, timedelta
+                            ci = lod.get("check_in")
+                            nights = int(lod.get("number_of_nights", 0))
+                            if ci and nights:
+                                ret_date = (datetime.strptime(str(ci)[:10], "%Y-%m-%d") + timedelta(days=nights)).strftime("%Y-%m-%d")
+                        except Exception:
+                            pass
+                    if ret_date:
+                        ret_seg = {
+                            "segment_id": "seg_return",
+                            "origin": {"type": "airport", "code": dest_code},
+                            "destination": {"type": "airport", "code": orig_code},
+                            "depart_date": ret_date,
+                            "passengers": default_passengers,
+                            "transport_mode": "flight",
+                            "depart_time_window": {"start": None, "end": None},
+                        }
+                        if traveler_ids_list:
+                            ret_seg["traveler_ids"] = traveler_ids_list
+                        segs.append(ret_seg)
         elif origin and dest:
             dep_date = clamp_date(dates.get("departure_date"))
             if not trip_type:
@@ -1744,6 +1784,8 @@ class GeneratePlan:
         Returns:
             Dictionary with keys: 'to_intent', 'compose_plan_light'
         """
+        print('Using prompts from package')
+        
         prompts = {
             'to_intent': '',
             'compose_plan_light': ''
