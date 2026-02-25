@@ -687,15 +687,13 @@ def eval_bool(expr: str, context: Dict[str, Any]) -> bool:
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Planner
+# IntentGenerator (core engine: message → intent)
 # ────────────────────────────────────────────────────────────────────────────────
 
-class Planner:
+class IntentGenerator:
     """
-    v2.2:
-      - LLM-crafted trip intent, plan adaptation/composition, and selection
-      - VectorDB retrieval for cases, facts, skills
-      - Action catalog provided to LLM; validator enforces action/arg correctness
+    Core engine for message → intent. VectorDB retrieval + LLM intent extraction.
+    Plan composition (intent → plan) lives in ProposePlan handler.
     """
     def __init__(self,
                  vdb: VectorDB,
@@ -1312,382 +1310,6 @@ User message: {user_message}
         
         return {'cases':cases, 'facts':facts, 'skills':skills}
 
-    def compose_from_cases(self, intent: Dict[str, Any], cases: Optional[List[VDBItem]] = None) -> Plan:
-        """Compose plan from intent using LLM. Cases provide canonical intent→plan examples."""
-        print('Composing plan from intent (with cases as examples)...')
-        catalog = [{
-            "name": t.key,
-            "description": t.description,
-            "required_args": t.required_args,
-            "optional_args": t.optional_args,
-            "success_criteria_hint": t.success_criteria_hint
-        } for t in self.action_catalog]
-        intent_json = json.dumps(intent_for_plan(intent), indent=2)
-
-        plan_examples = "[]"
-        if cases:
-            examples = []
-            for c in cases[:3]:
-                try:
-                    obj = json.loads(c.text)
-                    ex_intent = obj.get("intent", obj.get("trip_intent"))
-                    ex_plan = obj.get("plan", {})
-                    if isinstance(ex_intent, str):
-                        try:
-                            ex_intent = json.loads(ex_intent)
-                        except Exception:
-                            continue
-                    steps = ex_plan.get("steps", []) if isinstance(ex_plan, dict) else []
-                    if ex_intent and steps:
-                        intent_plan = intent_for_plan(ex_intent) if isinstance(ex_intent, dict) else ex_intent
-                        step_dicts = [s if isinstance(s, dict) else asdict(s) for s in steps[:10]]
-                        examples.append({"intent": intent_plan, "plan": {"steps": step_dicts}})
-                except Exception:
-                    pass
-            if examples:
-                plan_examples = json.dumps(examples, indent=2, cls=DecimalEncoder)
-
-        prompt_template = self.prompts.get('compose_plan', '')
-        if prompt_template:
-            replacements = {
-                'intent_text': intent_json,
-                'sig_text': intent_json,
-                'catalog': json.dumps(catalog, indent=2),
-                'plan_examples': plan_examples,
-                'plan_id': uuid.uuid4().hex[:8]
-            }
-            prompt = self._replace_tokens(prompt_template, replacements)
-        else:
-            prompt = f"""
-            You are a planner that composes a COMPLETE executable plan using ONLY the allowed actions.
-            TASK: COMPOSE_PLAN
-
-            CANONICAL EXAMPLES (intent → plan):
-            {plan_examples}
-
-            INSTRUCTIONS:
-            - Analyze the intent to understand all requirements and facts
-            - Use the ACTION CATALOG to determine available actions and their required inputs
-            - Learn from the canonical examples above for how to convert intent to plan
-            - Create a complete plan that addresses all intent requirements
-
-            PLAN COMPOSITION:
-            - Start with initial steps that establish prerequisites
-            - Add steps for each activity or requirement from the intent
-            - Ensure itinerary.segments and lodging.stays are represented as plan steps
-            - Respect dates, timing, and sequencing from segments and stays
-            - Apply constraints and preferences from the intent
-            - Create a logical flow where steps build upon each other
-
-            Intent:
-            ```json
-            {intent_json}
-            ```
-
-            ACTION_CATALOG:
-            ```json
-            {json.dumps(catalog, indent=2)}
-            ```
-
-            Return ONLY JSON:
-            {{"plan": {{"id":"{uuid.uuid4().hex[:8]}", "meta": {{"strategy":"compose"}}, "steps": [PlanStep..]}}}}
-
-            Each PlanStep:
-            {{
-            "step_id": 0,
-            "title": "descriptive title",
-            "action": "<actionName from ACTION_CATALOG>",
-            "inputs": {{"required_arg": "value", ...}},
-            "enter_guard": "True",
-            "success_criteria": "from action hint",
-            "depends_on": [],
-            "next_step": 1
-            }}
-
-            STEP STRUCTURE REQUIREMENTS:
-            - step_id: Sequential integer starting from 0 (0, 1, 2, 3, ...)
-            - depends_on: Array of step_id integers that this step depends on
-            - next_step: The step_id of the next step in execution order, or null for the last step
-            - title: Clear, descriptive title for what this step accomplishes
-            - action: Must match an action name from the ACTION_CATALOG
-            - inputs: Object containing all required_args from the action spec, plus any optional_args
-            - enter_guard: Boolean expression (typically "True")
-            - success_criteria: Expression to evaluate whether the step succeeded
-
-            CHRONOLOGICAL ORDER (CRITICAL):
-            - Steps MUST be listed in the order they occur in time
-            - step_id values MUST be sequential: 0, 1, 2, 3...
-            - next_step links to the following step (step 0 → 1 → 2 → 3 → null)
-            - Ensure dependencies are satisfied (depends_on steps execute before dependent steps)
-
-            FINAL VALIDATION BEFORE RETURNING:
-            - Does the plan address ALL requirements from the trip intent?
-            - Are itinerary.segments and lodging.stays represented in plan steps?
-            - Are all action required_args provided in step inputs?
-            - Is the plan logically complete and executable?
-            - Do step dependencies form a valid execution order?
-        """
-        data = self.llm.complete_json(prompt)
-        if not data or "plan" not in data:
-            print('[ERROR] LLM returned invalid plan structure')
-            return Plan(id=uuid.uuid4().hex[:8], steps=[], meta={"strategy": "compose", "error": "LLM returned invalid plan"})
-
-        steps = []
-        for idx, s in enumerate(data["plan"]["steps"]):
-            if "action" not in s or not s.get("action"):
-                print(f'[WARNING] Step {idx} missing or empty action field! Step data: {s}')
-            # Ensure all required fields are present
-            if "step_id" not in s:
-                s["step_id"] = len(steps)  # Fallback to sequential
-            if "depends_on" not in s:
-                s["depends_on"] = []
-            if "next_step" not in s:
-                s["next_step"] = None
-            try:
-                steps.append(PlanStep(**s))
-            except Exception as e:
-                print(f'[ERROR] Failed to create PlanStep from step {idx}: {e}')
-                print(f'[ERROR] Step data: {json.dumps(s, indent=2, cls=DecimalEncoder)}')
-                continue
-        plan = Plan(id=data["plan"]["id"], steps=steps, meta=data["plan"].get("meta", {}))
-        print('Raw composed plan:')
-        print(json.dumps({"id": plan.id, "meta": plan.meta, "steps": [asdict(s) for s in plan.steps]}, indent=2, cls=DecimalEncoder))
-        validated_plan = self._validate_and_patch_plan(plan)
-        #print('Validated composed plan:')
-        #print(json.dumps({"id": validated_plan.id, "meta": validated_plan.meta, "steps": [asdict(s) for s in validated_plan.steps]}, indent=2, cls=DecimalEncoder))
-        return validated_plan
-
-    # Validator: ensure known actions + required args are present
-    def _validate_and_patch_plan(self, plan: Plan) -> Plan:
-        print(f'Validating plan with {len(plan.steps)} steps...')
-        known = {t.key: t for t in self.action_catalog}
-        validated: List[PlanStep] = []
-        for s in plan.steps:
-            print(f'  Validating step {s.step_id}: action={repr(s.action)}, action_type={type(s.action)}, inputs={s.inputs}')
-            
-            # Check if action is empty or None
-            if not s.action or s.action == "":
-                print(f'    REJECTED: empty or missing action field (value: {repr(s.action)})')
-                continue
-            
-            # Check if action is in catalog
-            if s.action not in known:
-                print(f'    REJECTED: unknown action "{s.action}"')
-                continue
-            
-            spec = known[s.action]
-            inputs = s.inputs or {}
-            
-            missing = [a for a in spec.required_args if a not in inputs]
-            if missing:
-                print(f'    REJECTED: missing required args {missing}')
-                provided_keys = list(inputs.keys()) if inputs else []
-                continue
-            
-            # Populate optional fields if not present
-            if not s.success_criteria and spec.success_criteria_hint:
-                s.success_criteria = spec.success_criteria_hint
-            if not s.enter_guard:
-                s.enter_guard = "True"
-            print(f'    ACCEPTED')
-            validated.append(s)
-        print(f'Validation complete: {len(validated)}/{len(plan.steps)} steps kept')
-        plan.steps = validated
-        return plan
-
-
-
-    def _build_plan_from_intent(self, intent: Dict[str, Any], plan_id: str) -> Plan:
-        """
-        Build plan programmatically from intent. Intent is the source of truth.
-        Order: inbound flights → hotels (one per stay) → return flights.
-        Extensible: add activities, tours, restaurants when intent has them and actions exist.
-        """
-        def _code(v) -> str:
-            if isinstance(v, dict):
-                return v.get("code") or ""
-            return str(v) if v else ""
-
-        iti = intent.get("itinerary") or {}
-        segs = iti.get("segments") or []
-        lod = iti.get("lodging") or {}
-        stays_list = lod.get("stays") or []
-        party = intent.get("party") or {}
-        travelers = party.get("travelers") or {}
-        default_pax = int(travelers.get("adults", 0) or 0) + int(travelers.get("children", 0) or 0) + int(travelers.get("infants", 0) or 0) or 1
-
-        dest_code = _code(segs[0].get("destination")) if segs else None
-        last_dest = (stays_list[-1].get("location_code") if stays_list else None) or dest_code
-        if isinstance(last_dest, dict):
-            last_dest = last_dest.get("code") if last_dest else None
-        last_dest = str(last_dest or "").upper() or (str(dest_code or "").upper() if dest_code else "")
-
-        inbound: List[Dict] = []
-        return_segs: List[Dict] = []
-        intermediate: List[Dict] = []
-        for seg in segs:
-            d = _code(seg.get("destination"))
-            o = _code(seg.get("origin"))
-            if dest_code and d and str(d).upper() == str(dest_code).upper():
-                inbound.append(seg)
-            elif last_dest and o and str(o).upper() == str(last_dest).upper():
-                return_segs.append(seg)
-            else:
-                intermediate.append(seg)
-        if not inbound and not return_segs and segs:
-            inbound = list(segs)
-
-        steps: List[PlanStep] = []
-        leg = 0
-
-        for seg in inbound:
-            o_code = _code(seg.get("origin"))
-            d_code = _code(seg.get("destination"))
-            dep = seg.get("depart_date")
-            pax = seg.get("passengers", default_pax)
-            tids = seg.get("traveler_ids") or []
-            if o_code and d_code and dep:
-                steps.append(PlanStep(
-                    step_id=len(steps),
-                    title=f"{o_code} to {d_code} flight",
-                    action="quote_flight",
-                    inputs={
-                        "from_airport_code": o_code,
-                        "to_airport_code": d_code,
-                        "departure_date": dep,
-                        "leg": leg,
-                        "passengers": pax,
-                        "traveler_ids": tids,
-                    },
-                    enter_guard="True",
-                    success_criteria="len(result) > 0",
-                    depends_on=[len(steps) - 1] if len(steps) > 0 else [],
-                    next_step=None,
-                ))
-                leg += 1
-
-        prev_stay_loc = None
-        for stay in stays_list:
-            loc = stay.get("location_code") or dest_code
-            loc_code = (_code(loc) if isinstance(loc, dict) else str(loc or "").upper()) or (str(dest_code or "").upper() if dest_code else "")
-            ci = stay.get("check_in")
-            co = stay.get("check_out")
-            n_guests = stay.get("number_of_guests", default_pax)
-            tids = stay.get("traveler_ids") or []
-            if not loc or not ci or not co:
-                continue
-            if prev_stay_loc and loc_code and str(loc_code).upper() != str(prev_stay_loc).upper():
-                for seg in intermediate:
-                    o = _code(seg.get("origin"))
-                    d = _code(seg.get("destination"))
-                    if str(o).upper() == str(prev_stay_loc).upper() and str(d).upper() == str(loc_code).upper():
-                        dep = seg.get("depart_date")
-                        pax = seg.get("passengers", default_pax)
-                        seg_tids = seg.get("traveler_ids") or []
-                        if o and d and dep:
-                            steps.append(PlanStep(
-                                step_id=len(steps),
-                                title=f"{o} to {d} flight",
-                                action="quote_flight",
-                                inputs={
-                                    "from_airport_code": o,
-                                    "to_airport_code": d,
-                                    "departure_date": dep,
-                                    "leg": leg,
-                                    "passengers": pax,
-                                    "traveler_ids": seg_tids,
-                                },
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[len(steps) - 1] if len(steps) > 0 else [],
-                                next_step=None,
-                            ))
-                            leg += 1
-                        break
-            prev_stay_loc = loc_code
-            try:
-                from datetime import datetime
-                ci_dt = datetime.strptime(str(ci)[:10], "%Y-%m-%d")
-                co_dt = datetime.strptime(str(co)[:10], "%Y-%m-%d")
-                nights = max(1, (co_dt - ci_dt).days)
-            except Exception:
-                nights = 1
-            n_guests_str = str(n_guests) if isinstance(n_guests, (int, float)) else n_guests
-            steps.append(PlanStep(
-                step_id=len(steps),
-                title=f"{loc} hotel {nights} nights ({n_guests_str} guests)",
-                action="quote_hotel",
-                inputs={
-                    "city": loc,
-                    "area": None,
-                    "check_in_date": ci,
-                    "number_of_nights": str(nights),
-                    "number_of_guests": n_guests_str,
-                    "traveler_ids": tids,
-                },
-                enter_guard="True",
-                success_criteria="len(result) > 0",
-                depends_on=[len(steps) - 1] if steps else [],
-                next_step=None,
-            ))
-
-        for seg in return_segs:
-            o_code = _code(seg.get("origin"))
-            d_code = _code(seg.get("destination"))
-            dep = seg.get("depart_date")
-            pax = seg.get("passengers", default_pax)
-            tids = seg.get("traveler_ids") or []
-            if o_code and d_code and dep:
-                steps.append(PlanStep(
-                    step_id=len(steps),
-                    title=f"{o_code} to {d_code} flight",
-                    action="quote_flight",
-                    inputs={
-                        "from_airport_code": o_code,
-                        "to_airport_code": d_code,
-                        "departure_date": dep,
-                        "leg": leg,
-                        "passengers": pax,
-                        "traveler_ids": tids,
-                    },
-                    enter_guard="True",
-                    success_criteria="len(result) > 0",
-                    depends_on=[len(steps) - 1] if len(steps) > 0 else [],
-                    next_step=None,
-                ))
-                leg += 1
-
-        for i, step in enumerate(steps):
-            step.step_id = i
-            step.next_step = None if i == len(steps) - 1 else i + 1
-            step.depends_on = [i - 1] if i > 0 else []
-
-        return Plan(id=plan_id, steps=steps, meta={"strategy": "programmatic"})
-
-    # Light plan generation: intent → plan (programmatic; no LLM)
-    def compose_plan_light(self, intent: Dict[str, Any]) -> Plan:
-        """Build plan from intent programmatically. Intent is the source of truth."""
-        plan_id = uuid.uuid4().hex[:8]
-        plan = self._build_plan_from_intent(intent, plan_id)
-        return self._validate_and_patch_plan(plan)
-
-    # Orchestrator - plan is reflection of intent (no examples needed; intent is explicit)
-    def propose(self, intent: Dict[str, Any]) -> Dict[str, Any]:
-        function = 'propose'
-        print('Generating plan from intent (light)...')
-        print('Intent (preview):', json.dumps(intent_for_retrieval(intent))[:200])
-
-        plan = self.compose_plan_light(intent)
-        return {
-            "function": "propose",
-            "success": True,
-            "input": intent,
-            "output": {
-                "intent": intent,
-                "plan": asdict(plan),
-            }
-        }
-
     # Helper: convert VDB 'case' item to Case object
     def _vdb_case_to_case(self, item: VDBItem) -> Case:
         try:
@@ -1709,9 +1331,7 @@ User message: {user_message}
 # Create a context variable to store the request context
 request_context: ContextVar[RequestContext] = ContextVar('request_context', default=RequestContext())
 
-'''
-This class searches for Hotels using the Serp API
-'''
+
 
 class GeneratePlan:
     def __init__(self, prompts: Optional[Dict[str, str]] = None):
@@ -1994,12 +1614,12 @@ class GeneratePlan:
         return facts
     
     
-    def build_plan_generator(self, portfolio: str, org: str, 
+    def build_intent_generator(self, portfolio: str, org: str, 
                          prompt_ring: str = "pes_prompts",
                          action_ring: str = "schd_actions",
                          case_ring: str = "pes_cases",
                          fact_ring: str = "pes_facts",
-                         plan_actions: Union[str, List[str]] = "") -> Planner:
+                         plan_actions: Union[str, List[str]] = "") -> IntentGenerator:
         
         embedder = SimpleEmbedder()
         vdb = VectorDB(embedder)
@@ -2078,7 +1698,7 @@ class GeneratePlan:
         if not facts:
             print('Warning: No facts loaded from database, VDB will not have facts')
 
-        return Planner(vdb=vdb, llm=llm, action_catalog=action_catalog_specific, prompts=prompts)
+        return IntentGenerator(vdb=vdb, llm=llm, action_catalog=action_catalog_specific, prompts=prompts)
 
     
     def run(self, payload):
@@ -2145,7 +1765,7 @@ class GeneratePlan:
 
             results = []
             print('Initializing PES>GeneratePlan')
-            planner = self.build_plan_generator(
+            intent_generator = self.build_intent_generator(
                 portfolio=context.portfolio,
                 org=context.org,
                 prompt_ring="pes_prompts",
@@ -2161,8 +1781,8 @@ class GeneratePlan:
             
             # Step 1: Generate Intent
             
-            retrieved = planner.retrieve(user_message, k_cases=4, k_facts=4, k_skills=6)
-            intent = planner.to_intent(req, cases=retrieved.get('cases', []),
+            retrieved = intent_generator.retrieve(user_message, k_cases=4, k_facts=4, k_skills=6)
+            intent = intent_generator.to_intent(req, cases=retrieved.get('cases', []),
                                        facts=retrieved.get('facts', []), skills=retrieved.get('skills', []))
             if not intent:
                 return {'success': False, 'function': function, 'input': payload, 'output': 'Intent could not be extracted'}

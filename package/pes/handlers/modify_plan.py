@@ -133,8 +133,8 @@ def _intent_summary_for_delta(intent: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-class _IntentModifier:
-    """Internal: extracts delta from user correction via LLM, applies programmatically to intent."""
+class IntentModifier:
+    """Extracts delta from user correction via LLM, applies programmatically to intent. Uses cases as canonical examples."""
 
     def __init__(self, agu, prompts: Optional[Dict[str, str]] = None):
         self.AGU = agu
@@ -147,8 +147,9 @@ class _IntentModifier:
             self._llm = AIResponsesLLM(self.AGU)
         return self._llm
 
-    def modify(self, base_intent: Dict[str, Any], user_correction: str) -> Optional[Dict[str, Any]]:
-        delta = self._extract_delta(base_intent, user_correction)
+    def modify(self, base_intent: Dict[str, Any], user_correction: str,
+               cases: Optional[List] = None) -> Optional[Dict[str, Any]]:
+        delta = self._extract_delta(base_intent, user_correction, cases=cases)
         if not delta or not delta.get("changes"):
             return None
         intent = copy.deepcopy(base_intent)
@@ -165,16 +166,43 @@ class _IntentModifier:
         intent["updated_at"] = int(time.time())
         return intent
 
-    def _extract_delta(self, base_intent: Dict[str, Any], user_correction: str) -> Optional[Dict[str, Any]]:
+    def _extract_delta(self, base_intent: Dict[str, Any], user_correction: str,
+                       cases: Optional[List] = None) -> Optional[Dict[str, Any]]:
         prompt_template = self.prompts.get("modify_intent_delta", "") or self._default_delta_prompt()
         existing = _intent_summary_for_delta(base_intent)
+        modification_examples = self._build_modification_examples(cases)
         prompt = prompt_template.replace("#existing_intent#", json.dumps(existing, indent=2))
         prompt = prompt.replace("#user_correction#", user_correction)
         prompt = prompt.replace("#now_date#", datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d"))
+        prompt = prompt.replace("#modification_examples#", modification_examples)
         data = self._get_llm().complete_json(prompt)
         if not data or not isinstance(data.get("changes"), list):
             return None
         return data
+
+    def _build_modification_examples(self, cases: Optional[List]) -> str:
+        """Build intent structure examples from cases (from DB: {'intent', 'plan'} or VDBItem with .text)."""
+        if not cases:
+            return "[]"
+        examples = []
+        for c in cases[:3]:
+            try:
+                if isinstance(c, dict):
+                    ex_intent = c.get("intent", c.get("trip_intent"))
+                else:
+                    text = getattr(c, 'text', str(c))
+                    obj = json.loads(text) if isinstance(text, str) else text
+                    ex_intent = obj.get("intent", obj.get("trip_intent"))
+                if isinstance(ex_intent, str):
+                    try:
+                        ex_intent = json.loads(ex_intent)
+                    except Exception:
+                        continue
+                if ex_intent and isinstance(ex_intent, dict):
+                    examples.append(_intent_summary_for_delta(ex_intent))
+            except Exception:
+                pass
+        return json.dumps(examples, indent=2) if examples else "[]"
 
     def _default_delta_prompt(self) -> str:
         return """TASK: MODIFY_INTENT_DELTA
@@ -189,6 +217,15 @@ CHANGE TYPES:
 - add_side_trip: "Add X nights in [City]", "stop in [City] before going home" = add city BEFORE return. Use city (IATA) and nights.
 - change_dates: User changes departure or return. Use departure_date and/or return_date.
 
+SIMILAR INTENTS (canonical examples):
+#modification_examples#
+
+EXISTING INTENT:
+#existing_intent#
+
+USER CORRECTION:
+#user_correction#
+
 Return ONLY valid JSON:
 {
   "changes": [
@@ -197,12 +234,6 @@ Return ONLY valid JSON:
     {"type": "change_dates", "departure_date": "YYYY-MM-DD", "return_date": "YYYY-MM-DD"}
   ]
 }
-
-EXISTING INTENT:
-#existing_intent#
-
-USER CORRECTION:
-#user_correction#
 """
 
     def _apply_change(self, intent: Dict[str, Any], change: Dict[str, Any], now_date: str) -> None:
@@ -548,6 +579,33 @@ class ModifyPlan:
         except Exception as e:
             print(f'Warning: Could not load prompts from package {package_route}: {e}')
         return prompts
+
+    def _load_seed_cases(self, portfolio: str, org: str, case_ring: str = "pes_cases", case_group: str = None) -> List[Dict[str, Any]]:
+        """Load cases from database. Returns list of {'intent', 'plan'} dicts."""
+        cases = []
+        try:
+            if not case_group:
+                return cases
+            query = {
+                'portfolio': portfolio,
+                'org': org,
+                'ring': case_ring,
+                'value': case_group,
+                'limit': 99,
+                'operator': 'begins_with',
+                'lastkey': None,
+                'sort': 'asc'
+            }
+            response = self.DAC.get_a_b_query(query)
+            if response and 'items' in response:
+                for item in response['items']:
+                    intent_text = item.get('intent', item.get('trip_intent', ''))
+                    plan_data = item.get('plan', {})
+                    if intent_text and plan_data:
+                        cases.append({'intent': intent_text, 'plan': plan_data})
+        except Exception as e:
+            print(f'Warning: Could not load cases from database: {e}')
+        return cases
     
     def _load_actions(self, portfolio: str, org: str, action_ring: str = "schd_actions") -> List[ActionSpec]:
         """
@@ -699,8 +757,12 @@ class ModifyPlan:
                     prompts = self._load_prompts_from_package(prompt_route)
                 else:
                     prompts = self._load_prompts(context.portfolio, context.org, case_group=context.case_group)
-                modifier = _IntentModifier(agu=self.AGU, prompts=prompts)
-                updated_intent = modifier.modify(base_intent, modification_request)
+                modifier = IntentModifier(agu=self.AGU, prompts=prompts)
+                cases = self._load_seed_cases(
+                    context.portfolio, context.org,
+                    case_ring="pes_cases", case_group=context.case_group
+                )[:3]
+                updated_intent = modifier.modify(base_intent, modification_request, cases=cases)
                 if not updated_intent:
                     return {'success': False, 'function': function, 'input': payload, 'output': 'ERROR:@modify_plan/run: Could not update intent from modification request.'}
                 try:
