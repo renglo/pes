@@ -72,13 +72,13 @@
       "kind"
     ]
   },
-  "irn": "irn:blueprint:irma:pes_seed_facts",
+  "irn": "irn:blueprint:irma:pes_facts",
   "label": "Facts",
   "license": "CC BY",
-  "name": "pes_seed_facts",
+  "name": "pes_facts",
   "public": true,
   "status": "final",
-  "uri": "https://pes.renglo.com/_blueprint/irma/pes_seed_facts/1.0.0",
+  "uri": "https://pes.renglo.com/_blueprint/irma/pes_facts/1.0.0",
   "version": "1.0.0"
 }
 

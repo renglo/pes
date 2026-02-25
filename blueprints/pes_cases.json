@@ -101,13 +101,13 @@
       "case_group"
     ]
   },
-  "irn": "irn:blueprint:irma:pes_seed_cases",
+  "irn": "irn:blueprint:irma:pes_cases",
   "label": "Seed Cases",
   "license": "CC BY",
-  "name": "pes_seed_cases",
+  "name": "pes_cases",
   "public": true,
   "status": "final",
-  "uri": "https://pes.renglo.com/_blueprint/irma/pes_seed_cases/1.0.0",
+  "uri": "https://pes.renglo.com/_blueprint/irma/pes_cases/1.0.0",
   "version": "1.0.0"
 }
 

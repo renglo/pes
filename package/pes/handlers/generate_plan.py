@@ -723,7 +723,7 @@ class Planner:
         # Tokens that should be wrapped in JSON code blocks
         json_tokens = {
             'intent_text', 'example_cases', 'fact_texts', 'catalog_summary',
-            'catalog', 'skills', 'activities_requested', 'plan_details', 'intent_examples'
+            'catalog', 'skills', 'plan_examples', 'activities_requested', 'plan_details', 'intent_examples'
         }
         
         for token, value in replacements.items():
@@ -781,9 +781,11 @@ class Planner:
             for c in cases[:3]:
                 try:
                     obj = json.loads(c.text)
-                    ex_intent = obj.get("intent", obj.get("trip_intent", ""))
+                    ex_message = obj.get("description","")
+                    ex_intent = obj.get("intent", {})
+                    ex_plan = obj.get("plan",{})
                     if ex_intent:
-                        examples.append({"intent_structure": ex_intent})
+                        examples.append({"message":ex_message,"intent": ex_intent})
                 except Exception:
                     pass
             if examples:
@@ -795,6 +797,7 @@ class Planner:
 
         prompt_template = self.prompts.get('to_intent', '')
         if prompt_template:
+            print('Using "to_intent" prompt template')
             replacements = {
                 'request_text': user_message, 'current_time': now_iso, 'now_date': now_date,
                 'intent_examples': intent_examples or '[]', 'fact_texts': fact_texts or '[]'
@@ -804,6 +807,7 @@ class Planner:
                 prompt += f"\n\nEXAMPLE INTENTS (learn structure from these):\n```json\n{intent_examples}\n```"
         else:
             # FALLBACK: used when pes_prompts.to_intent is empty; domain-specific (trips)
+            print('Using default prompt')
             prompt = f"""You are a travel requirements extractor. Extract trip details from the user message.
 
 Time context: Today is {now_date} ({now_iso}). Use YYYY-MM-DD for all dates. Dates must be on or after today.
@@ -850,12 +854,15 @@ User message: {user_message}
                 prompt += f"\n\nEXAMPLE INTENTS (learn structure from these similar cases):\n```json\n{intent_examples}\n```"
             if fact_texts:
                 prompt += f"\n\nRELEVANT FACTS:\n```json\n{fact_texts}\n```"
+        
+        #Run the prompt
+        print(f'[to_intent] prompt > LLM >> {prompt}')
         data = self.llm.complete_json(prompt)
         if not data:
             print('[ERROR] LLM returned no data for intent')
             return None
 
-        print('[DEBUG] LLM extraction:', json.dumps(data, indent=2))
+        print('[DEBUG] LLM results:', json.dumps(data, indent=2))
         extracted = self._merge_extract_into_intent(intent, data, now_date)
         return extracted
 
@@ -1272,6 +1279,7 @@ User message: {user_message}
         facts = self.vdb.search(query=query_str, kind="fact", k=k_facts, filters=filt)
         skills = self.vdb.search(query=query_str, kind="skill", k=k_skills, filters=filt)
 
+        '''
         # LLM skill scoring
         prompt_scores = f"""
             You are a skill ranker.
@@ -1298,11 +1306,15 @@ User message: {user_message}
         #print('Cases:',cases)
         #print('Facts:',facts)
         #print('Skills:',skills_ranked)
-        
         return {'cases':cases, 'facts':facts, 'skills':skills_ranked}
+        
+        '''
+        
+        return {'cases':cases, 'facts':facts, 'skills':skills}
 
-    def compose_from_skills(self, intent: Dict[str, Any], skills: List[VDBItem]) -> Plan:
-        print('Composing a new plan from scratch based on the user request...')
+    def compose_from_cases(self, intent: Dict[str, Any], cases: Optional[List[VDBItem]] = None) -> Plan:
+        """Compose plan from intent using LLM. Cases provide canonical intent→plan examples."""
+        print('Composing plan from intent (with cases as examples)...')
         catalog = [{
             "name": t.key,
             "description": t.description,
@@ -1311,14 +1323,37 @@ User message: {user_message}
             "success_criteria_hint": t.success_criteria_hint
         } for t in self.action_catalog]
         intent_json = json.dumps(intent_for_plan(intent), indent=2)
-        
-        prompt_template = self.prompts.get('compose_plan_light', '')
+
+        plan_examples = "[]"
+        if cases:
+            examples = []
+            for c in cases[:3]:
+                try:
+                    obj = json.loads(c.text)
+                    ex_intent = obj.get("intent", obj.get("trip_intent"))
+                    ex_plan = obj.get("plan", {})
+                    if isinstance(ex_intent, str):
+                        try:
+                            ex_intent = json.loads(ex_intent)
+                        except Exception:
+                            continue
+                    steps = ex_plan.get("steps", []) if isinstance(ex_plan, dict) else []
+                    if ex_intent and steps:
+                        intent_plan = intent_for_plan(ex_intent) if isinstance(ex_intent, dict) else ex_intent
+                        step_dicts = [s if isinstance(s, dict) else asdict(s) for s in steps[:10]]
+                        examples.append({"intent": intent_plan, "plan": {"steps": step_dicts}})
+                except Exception:
+                    pass
+            if examples:
+                plan_examples = json.dumps(examples, indent=2, cls=DecimalEncoder)
+
+        prompt_template = self.prompts.get('compose_plan', '')
         if prompt_template:
             replacements = {
                 'intent_text': intent_json,
                 'sig_text': intent_json,
                 'catalog': json.dumps(catalog, indent=2),
-                'skills': json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2),
+                'plan_examples': plan_examples,
                 'plan_id': uuid.uuid4().hex[:8]
             }
             prompt = self._replace_tokens(prompt_template, replacements)
@@ -1326,13 +1361,16 @@ User message: {user_message}
             prompt = f"""
             You are a planner that composes a COMPLETE executable plan using ONLY the allowed actions.
             TASK: COMPOSE_PLAN
-            
+
+            CANONICAL EXAMPLES (intent → plan):
+            {plan_examples}
+
             INSTRUCTIONS:
             - Analyze the intent to understand all requirements and facts
             - Use the ACTION CATALOG to determine available actions and their required inputs
-            - Reference the SKILLS for semantic hints and best practices
+            - Learn from the canonical examples above for how to convert intent to plan
             - Create a complete plan that addresses all intent requirements
-            
+
             PLAN COMPOSITION:
             - Start with initial steps that establish prerequisites
             - Add steps for each activity or requirement from the intent
@@ -1340,38 +1378,20 @@ User message: {user_message}
             - Respect dates, timing, and sequencing from segments and stays
             - Apply constraints and preferences from the intent
             - Create a logical flow where steps build upon each other
-            
-            USING THE ACTION CATALOG:
-            - Each action has required_args that MUST be provided in step.inputs
-            - Optional_args can be included if relevant
-            - Use action.success_criteria_hint as a guide for step.success_criteria
-            - Ensure all action inputs are populated with values from the intent
-            
-            INCORPORATING INTENT INFORMATION:
-            - Use itinerary.segments for flight legs (origin, destination, depart_date)
-            - Use itinerary.lodging.stays for hotel stays (location_code, check_in, check_out)
-            - Use party.travelers for passenger counts
-            - Use preferences and constraints to refine steps
-            - Use extras for domain-specific requirements
-            
+
             Intent:
             ```json
             {intent_json}
             ```
-            
+
             ACTION_CATALOG:
             ```json
             {json.dumps(catalog, indent=2)}
             ```
-            
-            Top Skills (semantic hints):
-            ```json
-            {json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2)}
-            ```
-            
+
             Return ONLY JSON:
             {{"plan": {{"id":"{uuid.uuid4().hex[:8]}", "meta": {{"strategy":"compose"}}, "steps": [PlanStep..]}}}}
-            
+
             Each PlanStep:
             {{
             "step_id": 0,
@@ -1383,7 +1403,7 @@ User message: {user_message}
             "depends_on": [],
             "next_step": 1
             }}
-            
+
             STEP STRUCTURE REQUIREMENTS:
             - step_id: Sequential integer starting from 0 (0, 1, 2, 3, ...)
             - depends_on: Array of step_id integers that this step depends on
@@ -1393,13 +1413,13 @@ User message: {user_message}
             - inputs: Object containing all required_args from the action spec, plus any optional_args
             - enter_guard: Boolean expression (typically "True")
             - success_criteria: Expression to evaluate whether the step succeeded
-            
+
             CHRONOLOGICAL ORDER (CRITICAL):
             - Steps MUST be listed in the order they occur in time
             - step_id values MUST be sequential: 0, 1, 2, 3...
             - next_step links to the following step (step 0 → 1 → 2 → 3 → null)
             - Ensure dependencies are satisfied (depends_on steps execute before dependent steps)
-            
+
             FINAL VALIDATION BEFORE RETURNING:
             - Does the plan address ALL requirements from the trip intent?
             - Are itinerary.segments and lodging.stays represented in plan steps?
@@ -1724,11 +1744,11 @@ class GeneratePlan:
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
-        Returns a dictionary with keys: 'to_intent', 'compose_plan_light'
+        Returns a dictionary with keys: 'to_intent', 'compose_plan'
         """
         prompts = {
             'to_intent': '',
-            'compose_plan_light': ''
+            'compose_plan': ''
         }
         
         try:
@@ -1764,8 +1784,8 @@ class GeneratePlan:
                     # Map keys to prompt types using exact match only
                     if key == 'to_intent':
                         prompts['to_intent'] = prompt_text
-                    elif key == 'compose_plan_light':
-                        prompts['compose_plan_light'] = prompt_text
+                    elif key == 'compose_plan':
+                        prompts['compose_plan'] = prompt_text
         except Exception as e:
             print(f'Warning: Could not load prompts from database: {str(e)}')
             
@@ -1782,13 +1802,13 @@ class GeneratePlan:
                           Example: 'noma.prompts.pes' loads from noma/prompts/pes/*.yaml
 
         Returns:
-            Dictionary with keys: 'to_intent', 'compose_plan_light'
+            Dictionary with keys: 'to_intent', 'compose_plan'
         """
         print('Using prompts from package')
         
         prompts = {
             'to_intent': '',
-            'compose_plan_light': ''
+            'compose_plan': ''
         }
         if not yaml:
             print('Warning: PyYAML not installed. Cannot load prompts from package.')
@@ -2167,6 +2187,7 @@ class GeneratePlan:
                 '_entity_type': entity_type,
                 '_entity_id': entity_id,
                 '_thread': thread,
+                'cases': retrieved.get('cases', []),
             }
             response_1 = ProposePlan().run(propose_payload)
             results.append(response_1)

@@ -43,7 +43,7 @@ class ProposePlan:
         request_context.set(ctx)
 
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
-        prompts = {'compose_plan_light': ''}
+        prompts = {'compose_plan': ''}
         try:
             if not case_group:
                 raise Exception('No case group')
@@ -57,8 +57,8 @@ class ProposePlan:
                 for item in response['items']:
                     key = item.get('key', '').lower()
                     prompt_text = (item.get('prompt') or '').lstrip()
-                    if key == 'compose_plan_light' and prompt_text:
-                        prompts['compose_plan_light'] = prompt_text
+                    if key == 'compose_plan' and prompt_text:
+                        prompts['compose_plan'] = prompt_text
         except Exception as e:
             print(f'Warning: Could not load prompts: {e}')
         return prompts
@@ -140,7 +140,12 @@ class ProposePlan:
                 action_catalog = [a for a in action_catalog if a.key in plan_actions_set]
 
             planner = Planner(vdb=vdb, llm=llm, action_catalog=action_catalog, prompts=prompts)
-            plan = planner.compose_plan_light(intent)
+            use_compose_from_cases = init.get('use_compose_from_cases', False)
+            if use_compose_from_cases:
+                cases = payload.get('cases') or []
+                plan = planner.compose_from_cases(intent, cases=cases)
+            else:
+                plan = planner.compose_plan_light(intent)
 
             return {
                 'success': True,
