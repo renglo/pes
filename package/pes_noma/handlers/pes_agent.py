@@ -7,7 +7,7 @@ from renglo.agent.agent_utilities import AgentUtilities
 from renglo.common import load_config
 
 # Improved Generate and Execute Plan
-from pes.handlers.execute_plan import ExecutePlan
+from pes_noma.handlers.execute_plan import ExecutePlan
 
 # Legacy Generate and Execute Plan
 #from .execute_plan import ExecutePlan
@@ -62,7 +62,7 @@ class RequestContext:
     public_user : str
         External user ID (for messages from outside the system)
     entity_type : str
-        Entity type 
+        Entity type
     entity_id : str
         Entity ID
     thread : str
@@ -247,7 +247,7 @@ class PesAgent:
                 context.thread
             )
         return self.AGU
-    
+
 
 
     # -------------------------------------------------------- LOOP FUNCTIONS
@@ -316,7 +316,7 @@ class PesAgent:
                 # Send to the planner
                 self.AGU.print_chat(f'No c_id provided...','transient')
                 next_action = 'to_be_determined'
-                
+
                 return {
                         'success':True,
                         'function':function,
@@ -341,7 +341,7 @@ class PesAgent:
                     'output':{
                             'next_action':next_action,
                             'message':pr
-                        }    
+                        }
                 }
 
             # PLAN ID
@@ -350,7 +350,7 @@ class PesAgent:
                 pr = f'Error: There is no plan_id in the c_id: ({c_id})'
                 self.AGU.print_chat(pr,'transient')
                 next_action = 'c_id_error'
-                
+
                 return {
                     'success':True,
                     'input': c_id,
@@ -359,20 +359,20 @@ class PesAgent:
                         'message':pr
                     }
                 }
-                
-            
-            # There is a plan_id in the c_id 
+
+
+            # There is a plan_id in the c_id
             plan_id = parts[2]
 
             # Retrieve plan from workspace
             workspace = self.AGU.get_active_workspace()
 
             if plan_id not in workspace['plan']:
-                
+
                 pr = f'No valid plan, generating new one.'
                 self.AGU.print_chat(pr,'transient')
                 next_action = 'c_id_error'
-                
+
                 return {
                     'success':True,
                     'input': c_id,
@@ -384,10 +384,10 @@ class PesAgent:
 
             else:
                 plan = workspace['plan'][plan_id]
-                plan_state = workspace['state_machine'][plan_id]    
+                plan_state = workspace['state_machine'][plan_id]
                 self._update_context(plan=plan,state_machine=plan_state)
-                
-                
+
+
             # PLAN STEP
             if not parts[3]:
                 # No plan step
@@ -450,7 +450,7 @@ class PesAgent:
                         'plan_step':plan_step,
                         'action_step':0,
                         'message':pr
-                    }  
+                    }
                 }
 
 
@@ -472,8 +472,8 @@ class PesAgent:
                         'plan_id':plan_id,
                         'plan_step':plan_step,
                         'action_step':action_step,
-                        'tool_step':0,  
-                        'message':pr 
+                        'tool_step':0,
+                        'message':pr
                     }
                 }
 
@@ -538,7 +538,7 @@ class PesAgent:
                     'plan_step':plan_step,
                     'action_step':action_step,
                     'tool_step':tool_step,
-                    'message':pr     
+                    'message':pr
                 }
             }
 
@@ -633,7 +633,7 @@ class PesAgent:
                     'input':payload,
                     'output':execution_result['output']
                 }
-                
+
 
             print(json.dumps(execution_result, indent=2, cls=DecimalEncoder))
 
@@ -654,13 +654,13 @@ class PesAgent:
                 'input':payload,
                 'output':pr
             }
-          
+
     def execute_plan(self,next_action,plan_id,plan_step,action_step,tool_step):
-         
+
         function = 'execute_plan'
         # We pass the plan_id and not the plan itself. Executor will retrieve it from workspace
         self.AGU.print_chat(f'Calling the executor for plan:{plan_id}, plan_step:{plan_step}, action_step:{action_step}, tool_step:{tool_step}','transient')
-        
+
         if next_action == 'initiate_plan':
             response = self.run_plan_action_tool(plan_id,0,0,0)
         elif next_action == 'initiate_action':
@@ -668,20 +668,20 @@ class PesAgent:
         elif next_action == 'initiate_tool':
             response = self.run_plan_action_tool(plan_id,plan_step,action_step,0)
         elif next_action == 'resume_tool':
-            response = self.run_plan_action_tool(plan_id,plan_step,action_step,tool_step) 
-            
+            response = self.run_plan_action_tool(plan_id,plan_step,action_step,tool_step)
+
         execution_results = json.dumps(response, indent=2, cls=DecimalEncoder)
-        return {'success':True,'function':function,'input':f'{plan_id}:{plan_step}:{action_step}:{tool_step}','output':response}   
+        return {'success':True,'function':function,'input':f'{plan_id}:{plan_step}:{action_step}:{tool_step}','output':response}
 
-    
 
-        
+
+
     ## Execution of Intentions
     def act(self,execution_request, extra=None):
         action = 'act'
-        
+
         list_tools_raw = self._get_context().list_tools
-        
+
         list_handlers = {}
         list_inits = {}
         for t in list_tools_raw:
@@ -693,23 +693,23 @@ class PesAgent:
                 except (json.JSONDecodeError, ValueError):
                     init_value = {}
             list_inits[t.get('key', '')] = init_value if isinstance(init_value, dict) else {}
-            
+
         self._update_context(list_handlers=list_handlers)
-    
+
         """Execute the current intention and return standardized response"""
         try:
-            
+
             tool_name = execution_request['tool_calls'][0]['function']['name']
             params = execution_request['tool_calls'][0]['function']['arguments']
             if isinstance(params, str):
                 params = json.loads(params)
             tid = execution_request['tool_calls'][0]['id']
-            
+
             print(f'tid:{tid}')
 
             if not tool_name:
                 raise ValueError("❌ No tool name provided in tool selection")
-                
+
             print(f"Selected tool: {tool_name}")
             self.AGU.print_chat(f'Calling tool {tool_name} with parameters {params} ', 'transient')
             print(f"Parameters: {params}")
@@ -720,20 +720,20 @@ class PesAgent:
                 print(error_msg)
                 self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
-            
+
             # Check if handler is an empty string
             if list_handlers[tool_name] == '':
                 error_msg = f"❌ Handler is empty"
                 print(error_msg)
                 self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
-            
+
             # Check if init exists and is valid
             handler_init = {}
             if not isinstance(list_inits[tool_name], str) and isinstance(list_inits[tool_name], dict):
                 handler_init = list_inits[tool_name]
-                
-                
+
+
             # Check if handler has the right format
             handler_route = list_handlers[tool_name]
             parts = handler_route.split('/')
@@ -742,100 +742,100 @@ class PesAgent:
                 print(error_msg)
                 self.AGU.print_chat(error_msg, 'error')
                 raise ValueError(error_msg)
-            
+
 
             portfolio = self._get_context().portfolio
             org = self._get_context().org
-            
+
             params['_portfolio'] = self._get_context().portfolio
             params['_org'] = self._get_context().org
             params['_entity_type'] = self._get_context().entity_type
             params['_entity_id'] = self._get_context().entity_id
             params['_thread'] = self._get_context().thread
             params['_init'] = handler_init
-            
+
             # Add the extra parameters to the params object
             if extra and isinstance(extra, dict):
-                params.update(extra) 
-            
-            print(f'Calling {handler_route} ') 
-            
+                params.update(extra)
+
+            print(f'Calling {handler_route} ')
+
             response = self.SHC.handler_call(portfolio,org,parts[0],parts[1],params)
-            
+
             print(f'Handler response:{response}')
 
             if not response['success']:
                 return {'success':False,'action':action,'input':params,'output':response}
 
-            # The response of every handler always comes nested 
+            # The response of every handler always comes nested
             clean_output = response['output']
             clean_output_str = json.dumps(clean_output, cls=DecimalEncoder)
-            
+
             interface = None
-            
+
             # The handler determines the interface
             if isinstance(response['output'], dict) and 'interface' in response['output']:
                 interface = response['output']['interface']
             elif isinstance(response['output'], list) and len(response['output']) > 0 and 'interface' in response['output'][0]:
                 interface = response['output'][0]['interface']
 
-               
-            
+
+
             tool_out = {
                     "role": "tool",
                     "tool_call_id": f'{tid}',
                     "content": clean_output_str,
                     "tool_calls":False
                 }
-            
+
 
             # Save the message after it's created
             if interface:
                 self.AGU.save_chat(tool_out,interface=interface,connection_id=self._get_context().connection_id)
-                
+
             else:
                 self.AGU.save_chat(tool_out,connection_id=self._get_context().connection_id)
-                
+
 
             # Results coming from the handler
             self._update_context(execute_intention_results=tool_out)
 
             # Save handler result to workspace
-            
+
             # Turn an object like this one: {"people":"4","time":"16:00","date":"2025-06-04"}
             # Into a string like this one: "4/16:00/2026-06-04"
             # If the value of each key is not a string just output an empty space in its place
             #params_str = self.format_object_to_slash_string(params)
-            index = f'irn:tool_rs:{handler_route}' 
-            tool_input = execution_request['tool_calls'][0]['function']['arguments'] 
+            index = f'irn:tool_rs:{handler_route}'
+            tool_input = execution_request['tool_calls'][0]['function']['arguments']
             #input is a serialize json, you need to turn it into a python object before inserting it into the value dictionary
             tool_input_obj = json.loads(tool_input) if isinstance(tool_input, str) else tool_input
             value = {'input': tool_input_obj, 'output': clean_output}
             self.AGU.mutate_workspace({'cache': {index:value}}, public_user=self._get_context().public_user, workspace_id=self._get_context().workspace_id)
-            
+
             print(f'flag5')
-            
+
             #print(f'message output: {tool_out}')
             print("✅ Tool execution complete.")
-            
+
             return {"success": True, "action": action, "input": execution_request, "output": tool_out}
-                    
+
         except Exception as e:
 
             error_msg = f"❌ Execute Intention failed. @act trying to run tool:'{tool_name}': {str(e)}"
-            self.AGU.print_chat(error_msg,'error') 
+            self.AGU.print_chat(error_msg,'error')
             print(error_msg)
             self._update_context(execute_intention_error=error_msg)
-            
+
             error_result = {
-                "success": False, "action": action,"input": execution_request,"output": str(e)    
+                "success": False, "action": action,"input": execution_request,"output": str(e)
             }
-            
+
             self._update_context(execute_intention_results=error_result)
             return error_result
-        
-    
-    
+
+
+
     def run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Main entry point for agent execution.
@@ -900,10 +900,10 @@ class PesAgent:
         GeneratePlan : Generates new plans
         ExecutePlan : Executes plans
         """
-        
+
         '''
-        This agent expects an input with the following format: 
-        
+        This agent expects an input with the following format:
+
         {
             'portfolio':'Portfolio the message is targeted to',
             'org':'Organization the message is targeted to',
@@ -916,7 +916,7 @@ class PesAgent:
             'next':(Optional) ContinuityID sent by the client system to continue a transaction.
         }
 
-        
+
 
         Plan of action
 
@@ -950,7 +950,7 @@ class PesAgent:
         # Initialize a new request context
         action = 'run'
         print(f'Running: {action}')
-        print(f'Payload: {payload}')  
+        print(f'Payload: {payload}')
 
         try:
 
@@ -1013,23 +1013,23 @@ class PesAgent:
                 context.thread,
                 connection_id = context.connection_id
                 )
-            
-            
+
+
             # Get available actions and tools
             actions = self.DAC.get_a_b(context.portfolio, context.org, 'schd_actions')
             context.list_actions = actions['items']
-            
+
             tools = self.DAC.get_a_b(context.portfolio, context.org, 'schd_tools')
             context.list_tools = tools['items']
-                
- 
+
+
             # Set the initial context for this turn
             print('Setting initial context ...')
             self._set_context(context)
-           
+
             results = []
 
-            
+
             # Step 0: Create thread/message document
             print('Creating document for this turn ...')
             response_0 = self.AGU.new_chat_message_document(context.message, public_user=context.public_user, next=context.next)
@@ -1040,41 +1040,41 @@ class PesAgent:
 
             # Step 1: Continuity Router
             self.AGU.print_chat(f'Analyzing continuity ID...','transient')
-            
+
             self.AGU.print_chat(f'Running continuity router ...','transient')
-            
+
             response_1 = self.continuity_router(context.next)
             results.append(response_1)
             if not response_1['success']:
                 return {'success':False,'action':action,'output':results}
-            
+
             self.AGU.print_chat(f'{response_1['output']['message']} ','transient')
-            
+
 
             next_action = response_1.get('output', {}).get('next_action', None)
             plan_id = response_1.get('output', {}).get('plan_id', None)
             plan_step = response_1.get('output', {}).get('plan_step', 0)
             action_step = response_1.get('output', {}).get('action_step', 0)
             tool_step = response_1.get('output', {}).get('tool_step', 0)
-            
-            
-            # PLAN EXECUTION  
-            if next_action in ['initiate_plan','initiate_action','initiate_tool','resume_tool']:  
+
+
+            # PLAN EXECUTION
+            if next_action in ['initiate_plan','initiate_action','initiate_tool','resume_tool']:
                 # Skipping high level agent and going directly to plan execution
                 response_1a = self.execute_plan(next_action,plan_id,plan_step,action_step,tool_step)
-                results.append(response_1a)  
+                results.append(response_1a)
                 m = { "role": "assistant", "content":f'🤖🤖'}
-                self.AGU.save_chat(m) 
+                self.AGU.save_chat(m)
                 return {'success':True,'action':action,'input':payload,'output':results}
-                
-           
-            
+
+
+
             # ACTION SELECTION
             # Figure out if a plan already exists to select action.
-            if self._get_context().plan and self._get_context().state_machine :             
-                # If yes, use the modifying_plan action, 
-                current_action = 'modifying_plan' 
-                current_desire = 'Modify an existing plan'    
+            if self._get_context().plan and self._get_context().state_machine :
+                # If yes, use the modifying_plan action,
+                current_action = 'modifying_plan'
+                current_desire = 'Modify an existing plan'
             else:
                 # If no, use the creating_plan action.
                 current_action = 'creating_plan'
@@ -1085,56 +1085,56 @@ class PesAgent:
                 'action': current_action,
                 'desire': current_desire
                 })
-            
-            
+
+
             # AGENT LOOP
             loops = 0
             loop_limit = 6
             while loops < loop_limit:
                 loops = loops + 1
                 print(f'Loop iteration {loops}/{loop_limit}')
-                
+
                 # Filter actions to only include the current action (security: prevent prompt hacking)
                 list_actions_specific = [action for action in context.list_actions if action.get('key') == current_action]
-                
+
                 # Get tools_reference from the current action
                 list_tools_specific = []
                 if list_actions_specific:
                     current_action_obj = list_actions_specific[0]
                     tools_reference = current_action_obj.get('tools_reference', '')
-                    
+
                     # Parse tools_reference (comma-separated string of tool keys)
                     if tools_reference and tools_reference not in ['_', '-', '.', '']:
                         # Split by comma and strip whitespace
                         tool_keys = [key.strip() for key in tools_reference.split(',') if key.strip()]
-                        
+
                         # Filter tools to only include those referenced by the current action
                         list_tools_specific = [
-                            tool for tool in context.list_tools 
+                            tool for tool in context.list_tools
                             if tool.get('key') in tool_keys
                         ]
-                
-                # Step 1: Interpret. We receive the message from the user and we issue a tool command or another message       
+
+                # Step 1: Interpret. We receive the message from the user and we issue a tool command or another message
                 response_2 = self.AGU.interpret(list_actions=list_actions_specific,list_tools=list_tools_specific)
                 results.append(response_2)
                 if not response_2['success']:
                     # Something went wrong during message interpretation
-                    return {'success':False,'action':action,'output':results}  
-                       
+                    return {'success':False,'action':action,'output':results}
+
                 # Check whether we need to run a tool
                 if 'tool_calls' not in response_2['output'] or not response_2['output']['tool_calls']:
-                    # No tool needs execution. 
-                    # Most likely the agent is asking for more information to fill tool parameters. 
+                    # No tool needs execution.
+                    # Most likely the agent is asking for more information to fill tool parameters.
                     # Or agent is answering questions directly from the belief system.
                     self.AGU.print_chat(f'🤖','transient')
                     return {'success':True,'action':action,'input':payload,'output':results}
-                                
+
                 else:
                     # Step 2: Act. Agent runs the tool
                     extra = {
                         'case_group':'x'
                         }
-                    
+
                     #Validate that response_2['output'] has this format inside : ['tool_calls'][0]['function']['name'] before calling act
                     try:
                         tool_calls = response_2['output'].get('tool_calls', [])
@@ -1145,7 +1145,7 @@ class PesAgent:
                                 'error': 'Invalid tool_calls format: tool_calls must be a non-empty list',
                                 'output': results
                             }
-                        
+
                         first_tool_call = tool_calls[0]
                         if not isinstance(first_tool_call, dict) or 'function' not in first_tool_call:
                             return {
@@ -1154,7 +1154,7 @@ class PesAgent:
                                 'error': 'Invalid tool_calls format: first tool_call must have a function key',
                                 'output': results
                             }
-                        
+
                         function = first_tool_call['function']
                         if not isinstance(function, dict) or 'name' not in function:
                             return {
@@ -1171,16 +1171,16 @@ class PesAgent:
                             'error': f'Invalid response_2 format: {str(e)}',
                             'output': results
                         }
-                        
-                    
-                    
+
+
+
                     response_3 = self.act(response_2['output'], extra = extra)
                     results.append(response_3)
-                        
+
                     if not response_3['success']:
                         # Something went wrong during tool execution
                         return {'success':False,'action':action,'output':results}
-                    
+
                     else:
                         if tool_name == 'commit_plan':
                             # response_3['output'] is tool_out which has 'content' as a JSON string
@@ -1189,7 +1189,7 @@ class PesAgent:
                                     content = response_3['output']['content']
                                     # Parse the JSON string
                                     tool_response = json.loads(content) if isinstance(content, str) else content
-                                    
+
                                     # Only proceed if it's a dict with next_action and plan_id
                                     if isinstance(tool_response, dict) and 'next_action' in tool_response and 'plan_id' in tool_response and tool_response['next_action']=='initiate_plan':
                                         # PLAN EXECUTION (immediately after approval)
@@ -1202,29 +1202,29 @@ class PesAgent:
                                 except (json.JSONDecodeError, KeyError, TypeError):
                                     # Skip if content doesn't match expected format
                                     pass
-                        
-         
+
+
             #Gracious exit. Analyze the last tool run (act()) but you can't issue a new tool_call.
             response_2 = self.AGU.interpret(no_tools=True)
             results.append(response_2)
             if not response_2['success']:
                     # Something went wrong during message interpretation
-                    return {'success':False,'action':action,'output':results} 
-            
-            
+                    return {'success':False,'action':action,'output':results}
+
+
             # If we reach here, we hit the loop limit
             print(f'Warning: Reached maximum loop limit ({loop_limit})')
             self.print_chat(f'🤖⚠️  Can you re-formulate your request please?','text')
             return {'success':True,'action':action,'input':payload,'output':results}
-                
+
         except Exception as e:
             self.AGU.print_chat(f'🤖❌(pes_agent):{e}','error')
             error_result = {'success':False,'action':action,'output':f'Plan Generation Run failed. Error:{str(e)}'}
             results.append(error_result)
             return {'success':False,'action':action,'output':f'Plan Generation Run failed. Error:{str(e)}','stack':results}
-        
 
-        
+
+
 
 
 # Test block

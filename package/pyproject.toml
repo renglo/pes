@@ -3,9 +3,9 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pes-mod"
+name = "pes-noma-mod"
 version = "1.0.0"
-description = "PES custom handlers, blueprints, and utilities"
+description = "PES Noma custom handlers, blueprints, and utilities"
 authors = [
     {name = "PES Team"}
 ]
@@ -23,11 +23,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["pes", "pes.handlers"]
+packages = ["pes_noma", "pes_noma.handlers"]
 
 [tool.setuptools.package-data]
-pes = ["blueprints/*.json"]
-
-
-
-
+pes_noma = ["blueprints/*.json"]

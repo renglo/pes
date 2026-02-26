@@ -14,7 +14,7 @@ from renglo.agent.agent_utilities import AgentUtilities
 from renglo.common import load_config
 from renglo.data.data_controller import DataController
 
-from pes.handlers.generate_plan import (
+from pes_noma.handlers.generate_plan import (
     ActionSpec,
     Plan,
     PlanStep,
