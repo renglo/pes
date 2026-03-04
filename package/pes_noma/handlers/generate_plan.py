@@ -1361,6 +1361,364 @@ class GeneratePlan:
             setattr(context, key, value)
         self._set_context(context)
 
+    def _fetch_all_attendants(self, portfolio: str, org: str) -> List[Dict[str, Any]]:
+        """Fetch all active attendants from noma_attendants with pagination."""
+        all_attendants: List[Dict[str, Any]] = []
+        lastkey = None
+        while True:
+            response = self.DAC.get_a_b(portfolio, org, 'noma_attendants', limit=100, lastkey=lastkey)
+            if not response.get('success'):
+                break
+            items = response.get('items', [])
+            all_attendants.extend([a for a in items if a.get('isActive', True)])
+            lastkey = response.get('last_id')
+            if not lastkey:
+                break
+        return all_attendants
+
+    def _find_attendant_matches(self, name: str, attendants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Case-insensitive substring match against attendant names."""
+        name_lower = name.lower().strip()
+        if not name_lower:
+            return []
+        return [
+            a for a in attendants
+            if name_lower in (a.get('name') or '').lower().strip()
+        ]
+
+    def _find_attendant_fuzzy(self, name: str, attendants: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], float]:
+        """Return the closest attendant by SequenceMatcher ratio."""
+        from difflib import SequenceMatcher
+        name_lower = name.lower().strip()
+        best: Optional[Dict[str, Any]] = None
+        best_ratio = 0.0
+        for a in attendants:
+            ratio = SequenceMatcher(None, name_lower, (a.get('name') or '').lower().strip()).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best = a
+        return best, best_ratio
+
+    def _extract_names_from_message(self, user_message: str, n_travelers: int) -> List[str]:
+        """
+        Use the AGU LLM to extract traveler names explicitly mentioned in the message.
+        Returns all explicitly mentioned names (may exceed n_travelers if the LLM found more).
+        """
+        prompt_text = f"""Extract the names of ALL travelers explicitly mentioned in the travel request below.
+Return ONLY a JSON array of strings with the names, e.g. ["Arthur", "Maria Silva"].
+If no names are mentioned return [].
+Do not invent names. Include every person explicitly named in the request.
+
+Travel request: {user_message}"""
+        try:
+            if not self.AGU:
+                raise Exception("AGU not initialized")
+            prompt = {
+                "model": self.AGU.AI_1_MODEL,
+                "messages": [{"role": "user", "content": prompt_text}],
+                "temperature": 0,
+            }
+            response = self.AGU.llm(prompt)
+            raw = (response.content if response else None) or "[]"
+            raw = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
+            names = json.loads(raw)
+            if isinstance(names, list):
+                return [n for n in names if isinstance(n, str) and n.strip()]
+        except Exception as e:
+            print(f"[generate_plan] _extract_names_from_message error: {e}")
+        return []
+
+    def _resolve_traveler_ids_in_intent(
+        self,
+        intent: Dict[str, Any],
+        user_message: str,
+        portfolio: str,
+        org: str,
+    ) -> Dict[str, Any]:
+        """
+        Replace synthetic traveler IDs (t1, t2 …) in the intent with real
+        noma_attendants IDs resolved from names mentioned in the user message.
+        """
+        party = intent.get("party") or {}
+        synthetic_ids: List[str] = list(party.get("traveler_ids") or [])
+        n_travelers = len(synthetic_ids)
+
+        if not n_travelers:
+            return intent
+
+        try:
+            attendants = self._fetch_all_attendants(portfolio, org)
+        except Exception as e:
+            print(f"[generate_plan] _fetch_all_attendants error: {e}")
+            return intent
+
+        print(f"[generate_plan] fetched {len(attendants)} attendants from noma_attendants")
+        if not attendants:
+            print(f"[generate_plan] no attendants found — skipping traveler resolution")
+            return intent
+
+        names = self._extract_names_from_message(user_message, n_travelers)
+        print(f"[generate_plan] extracted traveler names: {names}")
+
+        if not names:
+            return intent
+
+        if len(names) > len(synthetic_ids):
+            existing_nums = set()
+            for sid in synthetic_ids:
+                if sid.startswith('t') and sid[1:].isdigit():
+                    existing_nums.add(int(sid[1:]))
+            next_num = max(existing_nums, default=0) + 1
+            for _ in range(len(names) - len(synthetic_ids)):
+                while next_num in existing_nums:
+                    next_num += 1
+                new_sid = f"t{next_num}"
+                synthetic_ids.append(new_sid)
+                existing_nums.add(next_num)
+                intent["party"]["traveler_ids"].append(new_sid)
+                intent["party"].setdefault("travelers_by_id", {})[new_sid] = {"group_index": str(next_num - 1)}
+                adults_count = int((intent.get("party") or {}).get("travelers", {}).get("adults", 1))
+                intent["party"]["travelers"]["adults"] = str(adults_count + 1)
+                for seg in (intent.get("itinerary") or {}).get("segments") or []:
+                    if "traveler_ids" in seg and new_sid not in seg["traveler_ids"]:
+                        seg["traveler_ids"].append(new_sid)
+                for stay in ((intent.get("itinerary") or {}).get("lodging") or {}).get("stays") or []:
+                    if "traveler_ids" in stay and new_sid not in stay["traveler_ids"]:
+                        stay["traveler_ids"].append(new_sid)
+                next_num += 1
+            print(f"[generate_plan] Extended synthetic_ids to {synthetic_ids}")
+
+        id_map: Dict[str, Optional[str]] = {}
+        unresolved: List[Dict[str, Any]] = []
+
+        for i, synthetic_id in enumerate(synthetic_ids):
+            name = names[i] if i < len(names) else None
+            if not name:
+                continue
+
+            exact = self._find_attendant_matches(name, attendants)
+
+            if len(exact) == 1:
+                id_map[synthetic_id] = exact[0]['_id']
+                print(f"[generate_plan] {synthetic_id} → {exact[0]['_id']} (name: {exact[0].get('name')})")
+            elif len(exact) > 1:
+                alternatives = [{"id": a["_id"], "name": a.get("name", ""), "email": a.get("email", "")} for a in exact]
+                unresolved.append({
+                    "synthetic_id": synthetic_id,
+                    "input_name": name,
+                    "type": "multiple_matches",
+                    "alternatives": alternatives,
+                    "message": f'Multiple attendants match "{name}": {", ".join(a["name"] for a in alternatives)}. Please clarify which one.',
+                })
+                print(f"[generate_plan] {synthetic_id}: ambiguous name '{name}'")
+            else:
+                best, ratio = self._find_attendant_fuzzy(name, attendants)
+                if best and ratio >= 0.8:
+                    id_map[synthetic_id] = best['_id']
+                    print(f"[generate_plan] {synthetic_id} → {best['_id']} (fuzzy {ratio:.2f}, name: {best.get('name')})")
+                else:
+                    unresolved.append({
+                        "synthetic_id": synthetic_id,
+                        "input_name": name,
+                        "type": "not_found",
+                        "message": f'No attendant found matching "{name}".',
+                    })
+                    print(f"[generate_plan] {synthetic_id}: no match for '{name}'")
+
+        if not id_map:
+            if unresolved:
+                intent["unresolved_travelers"] = unresolved
+            return intent
+
+        def _replace_ids(ids: List[str]) -> List[str]:
+            return [id_map.get(tid, tid) for tid in ids]
+
+        intent["party"]["traveler_ids"] = _replace_ids(synthetic_ids)
+
+        old_by_id: Dict[str, Any] = party.get("travelers_by_id") or {}
+        new_by_id: Dict[str, Any] = {}
+        for syn, data in old_by_id.items():
+            real = id_map.get(syn, syn)
+            new_by_id[real] = data
+        intent["party"]["travelers_by_id"] = new_by_id
+
+        for seg in (intent.get("itinerary") or {}).get("segments") or []:
+            if "traveler_ids" in seg:
+                seg["traveler_ids"] = _replace_ids(seg["traveler_ids"])
+
+        for stay in ((intent.get("itinerary") or {}).get("lodging") or {}).get("stays") or []:
+            if "traveler_ids" in stay:
+                stay["traveler_ids"] = _replace_ids(stay["traveler_ids"])
+
+        if unresolved:
+            intent["unresolved_travelers"] = unresolved
+
+        return intent
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # Policy resolution
+    # ────────────────────────────────────────────────────────────────────────────
+
+    def _inject_policies_per_traveler(
+        self,
+        intent: Dict[str, Any],
+        traveler_ids: List[str],
+        portfolio: str,
+        org: str,
+    ) -> Dict[str, Any]:
+        """
+        For each resolved traveler ID, fetch their policy from noma_travel_policy
+        and store policy_id reference in travelers_by_id. Unique policies go in policies_by_id.
+        """
+        policy_cache: Dict[str, Any] = {}
+        travelers_by_id: Dict[str, Any] = (intent.get('party') or {}).get('travelers_by_id') or {}
+        policies_by_id: Dict[str, Any] = {}
+
+        for tid in traveler_ids:
+            if str(tid).startswith('t') and str(tid)[1:].isdigit():
+                continue
+            try:
+                attendant = self.DAC.get_a_b_c(portfolio, org, 'noma_attendants', tid)
+                if not attendant or not attendant.get('_id'):
+                    continue
+
+                policy_id = attendant.get('policy_id')
+                if not policy_id:
+                    continue
+
+                if policy_id not in policy_cache:
+                    policy_doc = self.DAC.get_a_b_c(portfolio, org, 'noma_travel_policy', policy_id)
+                    policy_cache[policy_id] = policy_doc if (policy_doc and policy_doc.get('_id')) else None
+
+                policy = policy_cache[policy_id]
+                if not policy:
+                    continue
+
+                if tid not in travelers_by_id:
+                    travelers_by_id[tid] = {}
+                travelers_by_id[tid]['policy_id'] = policy_id
+                policies_by_id[policy_id] = policy
+
+                print(f"[generate_plan] Policy '{policy.get('name')}' ({policy_id}) linked to traveler {tid}")
+
+            except Exception as e:
+                print(f"[generate_plan] _inject_policies_per_traveler error for {tid}: {e}")
+
+        intent.setdefault('party', {})['travelers_by_id'] = travelers_by_id
+        intent['party']['policies_by_id'] = policies_by_id
+        return intent
+
+    def _inject_policies_into_intent(self, intent: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Merge all traveler policies into intent.preferences and intent.constraints
+        using the most-restrictive rule.
+        """
+        try:
+            party = intent.get('party') or {}
+            travelers_by_id = party.get('travelers_by_id') or {}
+            policies_by_id = party.get('policies_by_id') or {}
+
+            referenced_policy_ids = {
+                t['policy_id'] for t in travelers_by_id.values()
+                if isinstance(t, dict) and t.get('policy_id')
+            }
+            policies = [
+                policies_by_id[pid] for pid in referenced_policy_ids
+                if pid in policies_by_id and isinstance(policies_by_id[pid], dict)
+            ]
+            if not policies:
+                return intent
+        except Exception as e:
+            print(f"[generate_plan] _inject_policies_into_intent aborted: {e}")
+            return intent
+
+        FLIGHT_CLASS_ORDER = ['economy', 'premium_economy', 'business', 'first']
+
+        def most_restrictive_class(classes):
+            idxs = []
+            for c in classes:
+                try:
+                    idxs.append(FLIGHT_CLASS_ORDER.index(str(c).lower()))
+                except (ValueError, TypeError):
+                    pass
+            if not idxs:
+                return None
+            return FLIGHT_CLASS_ORDER[min(idxs)]
+
+        def min_val(key):
+            vals = []
+            for p in policies:
+                v = p.get(key)
+                if v is not None:
+                    try:
+                        vals.append(float(v))
+                    except (TypeError, ValueError):
+                        pass
+            return min(vals) if vals else None
+
+        def all_bool(key):
+            vals = []
+            for p in policies:
+                v = p.get(key)
+                if v is not None:
+                    try:
+                        vals.append(bool(v))
+                    except (TypeError, ValueError):
+                        pass
+            return all(vals) if vals else None
+
+        def intersect_lists(key):
+            sets = []
+            for p in policies:
+                v = p.get(key)
+                if isinstance(v, list):
+                    sets.append(set(v))
+                elif isinstance(v, str) and v:
+                    sets.append({v})
+            if not sets:
+                return None
+            result = sets[0]
+            for s in sets[1:]:
+                result = result & s
+            return list(result)
+
+        try:
+            merged_class = most_restrictive_class([p.get('max_flight_class') for p in policies])
+            merged_flight_budget = min_val('max_flight_budget')
+            merged_hotel_stars = min_val('max_hotel_stars')
+            merged_hotel_rate = min_val('max_hotel_daily_rate')
+            merged_car_rental = all_bool('allowed_car_rental')
+            merged_services = intersect_lists('enabled_services')
+            currency = next((p['currency'] for p in policies if p.get('currency')), None)
+
+            flight_prefs = intent.setdefault('preferences', {}).setdefault('flight', {})
+            hotel_prefs = intent['preferences'].setdefault('hotel', {})
+            constraints = intent.setdefault('constraints', {})
+
+            if merged_class:
+                flight_prefs['max_class'] = merged_class
+            if merged_flight_budget is not None:
+                flight_prefs['max_budget'] = merged_flight_budget
+            if merged_hotel_stars is not None:
+                hotel_prefs['max_stars'] = merged_hotel_stars
+            if merged_hotel_rate is not None:
+                hotel_prefs['max_daily_rate'] = merged_hotel_rate
+            if merged_car_rental is not None:
+                constraints['allowed_car_rental'] = merged_car_rental
+            if merged_services is not None:
+                constraints['enabled_services'] = merged_services
+            if currency:
+                constraints['currency'] = currency
+
+            print(f"[generate_plan] Most-restrictive policy merged: class={merged_class}, flight_budget={merged_flight_budget}, hotel_stars={merged_hotel_stars}, hotel_rate={merged_hotel_rate}")
+        except Exception as e:
+            print(f"[generate_plan] _inject_policies_into_intent merge failed: {e}")
+            import traceback; traceback.print_exc()
+
+        return intent
+
+    # ────────────────────────────────────────────────────────────────────────────
+
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
@@ -1786,6 +2144,25 @@ class GeneratePlan:
                                        facts=retrieved.get('facts', []), skills=retrieved.get('skills', []))
             if not intent:
                 return {'success': False, 'function': function, 'input': payload, 'output': 'Intent could not be extracted'}
+
+            # Step 1b: Resolve synthetic traveler IDs to real noma_attendants IDs
+            intent = self._resolve_traveler_ids_in_intent(
+                intent,
+                user_message,
+                context.portfolio,
+                context.org,
+            )
+            print(f"[generate_plan] Intent after traveler resolution: traveler_ids={intent.get('party', {}).get('traveler_ids')}")
+
+            # Step 1c: Attach each traveler's policy into intent.party + merge most restrictive
+            resolved_ids = (intent.get('party') or {}).get('traveler_ids') or []
+            intent = self._inject_policies_per_traveler(
+                intent,
+                resolved_ids,
+                context.portfolio,
+                context.org,
+            )
+            intent = self._inject_policies_into_intent(intent)
 
             self.AGU.mutate_workspace(
                 {'request_intent': intent},
