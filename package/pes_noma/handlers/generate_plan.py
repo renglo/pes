@@ -380,6 +380,11 @@ class AIResponsesLLM:
                                     "destination": {"type": "string"},
                                     "depart_date": {"type": "string"},
                                     "passengers": {"type": "integer"},
+                                    "transport_mode": {
+                                        "type": "string",
+                                        "enum": ["flight", "train", "bus"],
+                                        "description": "Transport mode for this segment: flight (default), train, or bus"
+                                    },
                                     "traveler_ids": {
                                         "type": "array",
                                         "items": {"type": "string"},
@@ -816,13 +821,25 @@ TRIP TYPES:
 - day_trip: Same-day return, NO hotel (origin → dest → origin same day)
 - multi_city: A → B → C → ... → A (multiple cities, use "segments" and "itinerary")
 - converging: Multiple groups from different origins meeting at one destination (use "converging_travelers")
+- lodging_only: Hotel/lodging only, NO flights needed. Use when user asks only for hotel stay without mentioning flights or origin city. Requires: city/destination, check-in date, number of nights, number of guests. Origin and segments should be null/empty.
+
+TRANSPORT MODES:
+- "flight" (default): air travel between airports. Use IATA airport codes for origin/destination.
+- "train": rail travel between cities/stations. Use city names (e.g., "Prague", "Bratislava", "Vienna").
+- "bus": bus travel between cities/stations. Use city names.
+- When the user mentions "train", "rail", "bus", "coach", "ground transport", set transport_mode accordingly in EACH segment.
+- If transport mode is not mentioned, default to "flight".
 
 RULES:
-- Origin/destination: use IATA airport codes when possible (JFK, EWR, SFO, LAX, MIA, MCO, DFW, GRU, etc.)
+- Origin/destination for flights: use IATA airport codes when possible (JFK, EWR, SFO, LAX, MIA, MCO, DFW, GRU, etc.)
+- Origin/destination for train/bus: use city names (e.g., "Prague", "Bratislava", "Vienna", "Budapest")
 - travelers: {{"adults": N, "children": 0, "infants": 0}} - adults required
 - For "X days in Y" or "3 nights": check_out = check_in + nights; lodging.number_of_nights = X
-- Multi-city: output "segments" (one per flight leg) and "itinerary" [{{"from":"City","to":"City","date":"YYYY-MM-DD"}}]
+- Multi-city: output "segments" (one per transport leg) and "itinerary" [{{"from":"City","to":"City","date":"YYYY-MM-DD"}}]
 - Day trip: same date for outbound and return, lodging.needed = false, no stays
+- Lodging only: when user asks ONLY for hotel (no flights mentioned, no origin city), set trip_type to "lodging_only",
+  origin to null, segments to [], and populate stays with location_code (city name or IATA code), check_in, check_out, number_of_guests.
+  Set lodging.needed = true. If number of guests not specified, assume 1 adult.
 - Activities: Extract ALL requested (city_tour, restaurant, day_trip, theater, museum, spa, conference, meeting)
   Format: [{{"type":"city_tour","description":"guided tour","location":"City"}}]
 - Converging: converging_travelers = [{{"count":N,"origin":"City","arrival_date":"YYYY-MM-DD"}}]
@@ -832,12 +849,12 @@ RULES:
 TASK: TO_TRIP_INTENT
 Return ONLY valid JSON:
 {{
-  "origin": "IATA or null",
-  "destination": "IATA or null",
-  "trip_type": "single_destination|round_trip|one_way|day_trip|multi_city|converging or null",
+  "origin": "IATA or city name",
+  "destination": "IATA or city name",
+  "trip_type": "single_destination|round_trip|one_way|day_trip|multi_city|converging|lodging_only or null",
   "dates": {{"departure_date": "YYYY-MM-DD or null", "return_date": "YYYY-MM-DD or null"}},
-  "segments": [{{"origin": "IATA", "destination": "IATA", "depart_date": "YYYY-MM-DD", "passengers": N}}],
-  "stays": [{{"location_code": "IATA", "check_in": "YYYY-MM-DD", "check_out": "YYYY-MM-DD", "number_of_guests": N}}],
+  "segments": [{{"origin": "IATA or city", "destination": "IATA or city", "depart_date": "YYYY-MM-DD", "passengers": N, "transport_mode": "flight|train|bus"}}],
+  "stays": [{{"location_code": "IATA or city", "check_in": "YYYY-MM-DD", "check_out": "YYYY-MM-DD", "number_of_guests": N}}],
   "travelers": {{"adults": 1, "children": 0, "infants": 0}},
   "lodging": {{"needed": true, "check_in": "YYYY-MM-DD or null", "check_out": "YYYY-MM-DD or null", "number_of_nights": N or null}},
   "activities": [{{"type": "activity_type", "description": "details", "location": "where"}}],
@@ -976,13 +993,15 @@ User message: {user_message}
                 if not seg_tids and not converging:
                     seg_tids = traveler_ids_list
                 if o_code and d_code and depart:
+                    seg_transport = es.get("transport_mode", "flight")
+                    loc_type = "city" if seg_transport in ("train", "bus") else "airport"
                     seg = {
                         "segment_id": es.get("segment_id") or f"seg_{i}",
-                        "origin": {"type": "airport", "code": o_code},
-                        "destination": {"type": "airport", "code": d_code},
+                        "origin": {"type": loc_type, "code": o_code},
+                        "destination": {"type": loc_type, "code": d_code},
                         "depart_date": depart,
                         "passengers": pax,
-                        "transport_mode": es.get("transport_mode", "flight"),
+                        "transport_mode": seg_transport,
                         "depart_time_window": {"start": None, "end": None},
                     }
                     if seg_tids:
@@ -1132,6 +1151,18 @@ User message: {user_message}
             intent.setdefault("itinerary", {})["segments"] = segs
 
         dest_code = (segs[0].get("destination") or {}).get("code") if segs else dest
+        # For lodging_only (hotel-only requests): derive dest_code from stays when no segments exist
+        if not dest_code and not segs:
+            extracted_stays_for_dest = extracted.get("stays") or lod.get("stays") or []
+            if extracted_stays_for_dest:
+                first_stay_loc = extracted_stays_for_dest[0].get("location_code") or extracted_stays_for_dest[0].get("destination")
+                if first_stay_loc:
+                    dest_code = str(first_stay_loc).upper() if isinstance(first_stay_loc, str) else (first_stay_loc.get("code") if isinstance(first_stay_loc, dict) else None)
+            # Also try destination from extracted data (LLM may set destination even without segments)
+            if not dest_code:
+                ext_dest = extracted.get("destination")
+                if ext_dest:
+                    dest_code = str(ext_dest).upper() if isinstance(ext_dest, str) else (ext_dest.get("code") if isinstance(ext_dest, dict) else None)
         ret_date = clamp_date(dates.get("return_date")) or (clamp_date(lod.get("check_out")) if lod else None)
         if not ret_date and segs:
             for s in segs:
@@ -1253,6 +1284,10 @@ User message: {user_message}
 
         if trip_type == "day_trip":
             intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = False
+
+        if trip_type == "lodging_only":
+            intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = True
+            intent.setdefault("itinerary", {})["segments"] = []
 
         if extracted.get("extras"):
             for k, v in extracted["extras"].items():
