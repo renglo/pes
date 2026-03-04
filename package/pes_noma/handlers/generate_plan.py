@@ -188,8 +188,8 @@ class RequestContext:
     query_params: Dict[str, Any] = field(default_factory=dict)
     case_group: str = ''
     init: Dict[str, Any] = field(default_factory=dict)
-    
-    
+
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Core data shapes
@@ -221,7 +221,7 @@ class Case:
     outcomes: Dict[str, Any]
     context: Dict[str, Any]
     created_at: float = field(default_factory=time.time)
-    
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Embedding + cosine (simple; swap with your prod embedder)
@@ -268,8 +268,8 @@ def cosine(a: List[float], b: List[float]) -> float:
     na = math.sqrt(sum(x*x for x in a[:n])) or 1.0
     nb = math.sqrt(sum(x*x for x in b[:n])) or 1.0
     return dot/(na*nb)
-    
-    
+
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Vector DB (mock)
@@ -309,9 +309,9 @@ class VectorDB:
                     s += 0.5  # Boost matching items
             scored.append((it, s))
         scored.sort(key=lambda x: x[1], reverse=True)
-        return [x[0] for x in scored[:k]] 
-    
-    
+        return [x[0] for x in scored[:k]]
+
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # LLM client (OpenAI-backed) with task-specific Structured Outputs
@@ -616,7 +616,7 @@ class AIResponsesLLM:
                 enhanced_prompt = f"{prompt}\n\nPlease respond with valid JSON matching this schema:\n{schema_str}"
                 response_kwargs["response_format"] = {"type": "json_object"}
                 response_kwargs["messages"][0]["content"] = enhanced_prompt
-        
+
         resp = self.AGU.llm(response_kwargs)
         return self._resp_text(resp)
 
@@ -626,7 +626,7 @@ class AIResponsesLLM:
         """
         task = self._detect_task(prompt)
         schema = self._schema_for_task(task)
-        
+
         # Prepare the API call
         if self._supports_structured_outputs():
             # Use structured outputs for newer models
@@ -647,7 +647,7 @@ class AIResponsesLLM:
                 'response_format': {"type": "json_object"}
             }
             resp = self.AGU.llm(request_params)
-        
+
         txt = self._resp_text(resp)
         try:
             return json.loads(txt)
@@ -661,10 +661,10 @@ class AIResponsesLLM:
                     pass
             # Fallback empty object
             return {}
-        
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Actions + Action Catalog
-# ────────────────────────────────────────────────────────────────────────────────    
+# ────────────────────────────────────────────────────────────────────────────────
 @dataclass
 class ActionSpec:
     key: str
@@ -704,17 +704,17 @@ class IntentGenerator:
         self.llm = llm
         self.action_catalog = action_catalog
         self.prompts = prompts or {}
-    
+
     def _replace_tokens(self, prompt: str, replacements: Dict[str, Any]) -> str:
         """
         Replace tokens in prompt template with actual values.
         Supports #token# format (new) and {token} format (legacy).
         JSON tokens are automatically wrapped in ```json ... ``` code blocks.
-        
+
         Args:
             prompt: Template string with tokens
             replacements: Dictionary mapping token names to values
-            
+
         Returns:
             Prompt with all tokens replaced
         """
@@ -723,7 +723,7 @@ class IntentGenerator:
             'intent_text', 'example_cases', 'fact_texts', 'catalog_summary',
             'catalog', 'skills', 'plan_examples', 'activities_requested', 'plan_details', 'intent_examples'
         }
-        
+
         for token, value in replacements.items():
             # Handle #token# format (new, preferred)
             token_placeholder = '#' + token + '#'
@@ -735,7 +735,7 @@ class IntentGenerator:
                     # Simple replacement for non-JSON tokens
                     replacement = str(value)
                 prompt = prompt.replace(token_placeholder, replacement)
-            
+
             # Legacy support for {token} and {{token}} formats
             legacy_placeholder1 = '{' + token + '}'
             legacy_placeholder2 = '{{' + token + '}}'
@@ -746,7 +746,7 @@ class IntentGenerator:
                     replacement = str(value)
                 prompt = prompt.replace(legacy_placeholder1, replacement)
                 prompt = prompt.replace(legacy_placeholder2, replacement)
-        
+
         return prompt
 
     # 1) Trip intent extraction via LLM - examples inform extraction (intent should be explicit for plan)
@@ -852,7 +852,7 @@ User message: {user_message}
                 prompt += f"\n\nEXAMPLE INTENTS (learn structure from these similar cases):\n```json\n{intent_examples}\n```"
             if fact_texts:
                 prompt += f"\n\nRELEVANT FACTS:\n```json\n{fact_texts}\n```"
-        
+
         #Run the prompt
         print(f'[to_intent] prompt > LLM >> {prompt}')
         data = self.llm.complete_json(prompt)
@@ -1298,16 +1298,16 @@ User message: {user_message}
         scored = self.llm.complete_json(prompt_scores).get("scores", [])
         #if not scored:
         #    return False
-        
+
         score_map = {s["skill_id"]: s["score"] for s in scored}
         skills_ranked = sorted(skills, key=lambda s: score_map.get(s.id, 0), reverse=True)
         #print('Cases:',cases)
         #print('Facts:',facts)
         #print('Skills:',skills_ranked)
         return {'cases':cases, 'facts':facts, 'skills':skills_ranked}
-        
+
         '''
-        
+
         return {'cases':cases, 'facts':facts, 'skills':skills}
 
     # Helper: convert VDB 'case' item to Case object
@@ -1337,14 +1337,14 @@ class GeneratePlan:
     def __init__(self, prompts: Optional[Dict[str, str]] = None):
         # Load config for handlers (independent of Flask)
         self.config = load_config()
-        
+
         self.AGU = None
         self.DAC = DataController(config=self.config)
         self.BPC = BlueprintController(config=self.config)
-        
+
         # Store prompts passed during initialization (from text files or database)
         self.prompts = prompts or {}
-        
+
 
     def _get_context(self) -> RequestContext:
         """Get the current request context."""
@@ -1360,7 +1360,7 @@ class GeneratePlan:
         for key, value in kwargs.items():
             setattr(context, key, value)
         self._set_context(context)
-    
+
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
@@ -1370,12 +1370,12 @@ class GeneratePlan:
             'to_intent': '',
             'compose_plan': ''
         }
-        
+
         try:
             # Get all prompt records for the case_group
             if not case_group:
                 raise Exception('No case group')
-            
+
             query = {
                 'portfolio': portfolio,
                 'org': org,
@@ -1387,20 +1387,20 @@ class GeneratePlan:
                 'sort': 'asc'
             }
             response = self.DAC.get_a_b_query(query)
-            
+
             #response = self.DAC.get_a_b(portfolio, org, prompt_ring, limit=1000)
             if response and 'items' in response:
                 for item in response['items']:
                     # Get the key field (exact match from database)
                     key = item.get('key', '').lower()
-                    
+
                     # Get prompt text from 'prompt' field only
                     prompt_text = item.get('prompt', '')
-                    
+
                     # Strip leading whitespace (database responses have leading spaces)
                     if prompt_text:
                         prompt_text = prompt_text.lstrip()
-                    
+
                     # Map keys to prompt types using exact match only
                     if key == 'to_intent':
                         prompts['to_intent'] = prompt_text
@@ -1408,8 +1408,8 @@ class GeneratePlan:
                         prompts['compose_plan'] = prompt_text
         except Exception as e:
             print(f'Warning: Could not load prompts from database: {str(e)}')
-            
-        
+
+
         return prompts
 
     def _load_prompts_from_package(self, package_route: str) -> Dict[str, str]:
@@ -1425,7 +1425,7 @@ class GeneratePlan:
             Dictionary with keys: 'to_intent', 'compose_plan'
         """
         print('Using prompts from package')
-        
+
         prompts = {
             'to_intent': '',
             'compose_plan': ''
@@ -1463,33 +1463,33 @@ class GeneratePlan:
         except Exception as e:
             print(f'Warning: Could not load prompts from package {package_route}: {e}')
         return prompts
-    
+
     def _load_actions(self, portfolio: str, org: str, action_ring: str = "schd_actions") -> List[ActionSpec]:
         """
         Load action catalog from database (schd_actions ring).
         Returns a list of ActionSpec objects.
         """
         actions = []
-        
+
         try:
             # Get all action records from the ring
             response = self.DAC.get_a_b(portfolio, org, action_ring, limit=1000)
             if response and 'items' in response:
-                
+
                 #Filter out
-                
+
                 for item in response['items']:
                     name = item.get('name', '')
                     key = item.get('key', '')
                     goal = item.get('goal', '')
                     tools_ref = item.get('tools_reference', '')
                     slots = item.get('slots', '')
-                    
+
                     # Parse slots field for argument definitions
                     # Format expected: JSON string with 'required' and 'optional' arrays
                     required_args = []
                     optional_args = []
-                    
+
                     if slots:
                         try:
                             # Try parsing as JSON first
@@ -1498,7 +1498,7 @@ class GeneratePlan:
                                 slots_data = json.loads(slots)
                             else:
                                 slots_data = slots
-                            
+
                             if isinstance(slots_data, dict):
                                 required_args = slots_data.get('required', [])
                                 optional_args = slots_data.get('optional', [])
@@ -1513,13 +1513,13 @@ class GeneratePlan:
                                 required_args = parts
                         except Exception as e:
                             print(f'Warning: Could not parse slots for action {name or key}: {str(e)}')
-                    
+
                     # Use goal as description, or fallback to name
                     description = goal or f"Action: {name or key}"
-                    
+
                     # Get success criteria from verification field if available
                     success_criteria_hint = item.get('verification', '')
-                    
+
                     if key:
                         action_key = key
                         actions.append(ActionSpec(
@@ -1531,22 +1531,22 @@ class GeneratePlan:
                         ))
         except Exception as e:
             print(f'Warning: Could not load actions from database: {str(e)}')
-            
-        
+
+
         return actions
-    
+
     def _load_seed_cases(self, portfolio: str, org: str, case_ring: str = "pes_seed_cases", case_group: str = None) -> List[Dict[str, Any]]:
         """
         Load seed cases from database (trips/cases ring).
         Returns a list of case dictionaries with 'intent' and 'plan' keys.
         """
         cases = []
-        
+
         try:
             # Get all case records from the ring
             if not case_group:
                 raise Exception('No case group')
-            
+
             query = {
                 'portfolio': portfolio,
                 'org': org,
@@ -1563,7 +1563,7 @@ class GeneratePlan:
                     # Expect case records to have 'intent' and 'plan' fields (trip_intent for backward compat)
                     intent_text = item.get('intent', item.get('trip_intent', ''))
                     plan_data = item.get('plan', {})
-                    
+
                     if intent_text and plan_data:
                         cases.append({
                             'intent': intent_text,
@@ -1571,21 +1571,21 @@ class GeneratePlan:
                         })
         except Exception as e:
             print(f'Warning: Could not load seed cases from database: {str(e)}')
-        
+
         return cases
-    
+
     def _load_facts(self, portfolio: str, org: str, fact_ring: str = "pes_seed_facts", case_group: str = None) -> List[Dict[str, Any]]:
         """
         Load facts from database (facts ring).
         Returns a list of fact dictionaries with 'text' and 'meta' keys.
         """
         facts = []
-        
+
         try:
             # Get all fact records from the ring
             if not case_group:
                 raise Exception('No case group')
-            
+
             query = {
                 'portfolio': portfolio,
                 'org': org,
@@ -1602,7 +1602,7 @@ class GeneratePlan:
                     # Expect fact records to have 'text' and 'meta' fields
                     text = item.get('text', '')
                     meta = item.get('meta', {})
-                    
+
                     if text:
                         facts.append({
                             'text': text,
@@ -1610,17 +1610,17 @@ class GeneratePlan:
                         })
         except Exception as e:
             print(f'Warning: Could not load facts from database: {str(e)}')
-        
+
         return facts
-    
-    
-    def build_intent_generator(self, portfolio: str, org: str, 
+
+
+    def build_intent_generator(self, portfolio: str, org: str,
                          prompt_ring: str = "pes_prompts",
                          action_ring: str = "schd_actions",
                          case_ring: str = "pes_cases",
                          fact_ring: str = "pes_facts",
                          plan_actions: Union[str, List[str]] = "") -> IntentGenerator:
-        
+
         embedder = SimpleEmbedder()
         vdb = VectorDB(embedder)
         # Pass the AgentUtilities instance to AIResponsesLLM
@@ -1629,7 +1629,7 @@ class GeneratePlan:
         # Get case_group from context
         context = self._get_context()
         case_group = context.case_group if context else None
-        
+
         # Use prompts from initialization if available, otherwise load from database or package
         if self.prompts:
             prompts = self.prompts
@@ -1639,10 +1639,10 @@ class GeneratePlan:
                 prompts = self._load_prompts_from_package(prompt_route)
             else:
                 prompts = self._load_prompts(portfolio, org, prompt_ring, case_group=case_group)
-        
+
         # Load actions from database
         action_catalog = self._load_actions(portfolio, org, action_ring)
-        
+
         # Filter action catalog to only include actions specified in plan_actions
         # plan_actions can be a list of strings or a comma-separated string (for backward compatibility)
         action_catalog_specific = []
@@ -1653,56 +1653,56 @@ class GeneratePlan:
             else:
                 # Backward compatibility: parse comma-separated string
                 plan_actions_set = {action.strip() for action in plan_actions.split(',') if action.strip()}
-            
+
             for a in action_catalog:
                 if a.key in plan_actions_set:
                     action_catalog_specific.append(a)
-  
+
         # Note: If no actions are loaded from database, action_catalog will be empty
         if not action_catalog_specific:
             print('Warning: No actions loaded from database, action_catalog_specific will be empty')
 
         # Load seed cases from database
         seed_cases = self._load_seed_cases(portfolio, org, case_ring, case_group=case_group)
-        
+
         # Add seed cases to VectorDB
         for case_data in seed_cases:
             intent_text = case_data.get('intent', case_data.get('trip_intent', ''))
             plan_data = case_data.get('plan', {})
             meta = case_data.get('meta', {})
-            
+
             if intent_text and plan_data:
                 vdb.add(kind="case",
                        text=json.dumps({"intent": intent_text, "plan": plan_data}),
                        meta=meta)
-        
+
         # Note: If no seed cases are loaded from database, VDB will be empty
         if not seed_cases:
             print('Warning: No seed cases loaded from database, VDB will be empty')
 
         # Load facts from database
         facts = self._load_facts(portfolio, org, fact_ring, case_group=case_group)
-        
+
         # Add facts to VectorDB
         for fact_data in facts:
             text = fact_data.get('text', '')
             kind = fact_data.get('kind', 'fact')
             meta = fact_data.get('meta', {})
-            
+
             if text:
                 vdb.add(kind=kind,
                        text=text,
                        meta=meta)
-        
+
         # Note: If no facts are loaded from database, VDB will not have facts
         if not facts:
             print('Warning: No facts loaded from database, VDB will not have facts')
 
         return IntentGenerator(vdb=vdb, llm=llm, action_catalog=action_catalog_specific, prompts=prompts)
 
-    
+
     def run(self, payload):
-        
+
         '''
         Payload
         {
@@ -1715,38 +1715,38 @@ class GeneratePlan:
         function = 'run > generate_plan'
         print(f'Running:{function}')
         context = RequestContext()
-        
+
         if 'portfolio' in payload:
             context.portfolio = payload['portfolio']
         else:
             return {'success':False,'function':function,'input':payload,'output':'No portfolio provided'}
-        
+
         if 'org' in payload:
             context.org = payload['org']
         else:
             return {'success':False,'function':function,'input':payload,'output':'No org provided'}
-        
+
         if 'case_group' in payload:
             context.case_group = payload['case_group']
         else:
             return {'success':False,'function':function,'input':payload,'output':'No case group provided'}
-        
+
         if '_init' in payload:
             raw = payload['_init']
             context.init = json.loads(raw) if isinstance(raw, str) else raw
         else:
             context.init = {}
-            
-        
+
+
         try:
             self._set_context(context)
-            
+
             entity_type = payload.get('_entity_type') or 'some_entity_type'
             entity_id = payload.get('_entity_id') or 'some_entity_id'
             thread = payload.get('_thread') or 'some_thread'
             workspace_id = payload.get('workspace_id') or payload.get('workspace')
             public_user = payload.get('public_user')
-            
+
             self.AGU = AgentUtilities(
                 self.config,
                 context.portfolio,
@@ -1756,7 +1756,7 @@ class GeneratePlan:
                 thread
             )
             print("Agent Utilities initialized")
-            
+
             if 'plan_actions' in context.init:
                 plan_actions = context.init['plan_actions']
             else:
@@ -1778,9 +1778,9 @@ class GeneratePlan:
             user_message = payload.get("message", "").strip()
             req = {"request": user_message, "message": user_message}
 
-            
+
             # Step 1: Generate Intent
-            
+
             retrieved = intent_generator.retrieve(user_message, k_cases=4, k_facts=4, k_skills=6)
             intent = intent_generator.to_intent(req, cases=retrieved.get('cases', []),
                                        facts=retrieved.get('facts', []), skills=retrieved.get('skills', []))
@@ -1793,11 +1793,11 @@ class GeneratePlan:
                 workspace_id=workspace_id
             )
             print('Intent stored in workspace')
-            
-            
+
+
             # Step 2: Generate Plan
 
-            from pes.handlers.propose_plan import ProposePlan
+            from pes_noma.handlers.propose_plan import ProposePlan
             propose_payload = {
                 'portfolio': context.portfolio,
                 'org': context.org,
@@ -1816,8 +1816,7 @@ class GeneratePlan:
 
             canonical = results[-1]['output']
             return {'success': True, 'interface': 'plan', 'input': payload, 'output': canonical, 'stack': results}
-            
+
         except Exception as e:
             print(f'Error during execution: {str(e)}')
             return {'success': False, 'function': function, 'input': payload, 'output': f'ERROR:@generate_plan/run: {str(e)}'}
-

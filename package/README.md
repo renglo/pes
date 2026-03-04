@@ -25,7 +25,7 @@ pip install -e package/
 All handlers implement a standard `run(payload)` interface:
 
 ```python
-from pes.handlers import ExampleHandler
+from pes_noma.handlers import ExampleHandler
 
 # Example Handler
 handler = ExampleHandler()
@@ -66,21 +66,21 @@ pytest package/tests/
 1. Create a new handler file in `pes/handlers/`:
 
 ```python
-# pes/handlers/my_handler.py
+# pes_noma/handlers/my_handler.py
 class MyHandler:
     def __init__(self, config=None):
         self.config = config or {}
-    
+
     def run(self, payload):
         # Implementation
         return {'success': True, 'output': result}
 ```
 
-2. Register it in `pes/__init__.py`:
+2. Register it in `pes_noma/__init__.py`:
 
 ```python
 def get_my_handler():
-    from pes.handlers.my_handler import MyHandler
+    from pes_noma.handlers.my_handler import MyHandler
     return MyHandler
 
 HANDLERS = {
@@ -89,10 +89,10 @@ HANDLERS = {
 }
 ```
 
-3. Add to `pes/handlers/__init__.py`:
+3. Add to `pes_noma/handlers/__init__.py`:
 
 ```python
-from pes.handlers.my_handler import MyHandler
+from pes_noma.handlers.my_handler import MyHandler
 
 __all__ = [
     # ... existing handlers
@@ -113,7 +113,3 @@ This module follows the refactored architecture:
 ## License
 
 See main repository LICENSE files.
-
-
-
-

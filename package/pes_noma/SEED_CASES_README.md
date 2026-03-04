@@ -51,10 +51,10 @@ Each case in the database should have the following structure:
 
 ### Regenerating seed_cases.json
 
-From `extensions/pes/package`:
+From `extensions/pes_noma/package`:
 
 ```bash
-python3 pes/scripts/build_seed_cases.py
+python3 pes_noma/scripts/build_seed_cases.py
 ```
 
 ## How to Insert into Database
@@ -120,4 +120,3 @@ for case in cases:
 - This matches the format used by `intent_for_retrieval()` which returns a dict; serialize with `json.dumps()` when needed
 - The `plan.steps` array contains all the plan steps with their actions, inputs, and dependencies
 - Metadata fields can be used for filtering cases by destination, type, season, or purpose
-

@@ -39,9 +39,9 @@ class RequestContext:
     case_group: str = ''
     init: Dict[str, Any] = field(default_factory=dict)
     trip: Dict[str, Any] = field(default_factory=dict)
-    
-    
-    
+
+
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Core data shapes
@@ -64,12 +64,12 @@ class Plan:
     steps: List[PlanStep]
     meta: Dict[str, Any] = field(default_factory=dict)
 
-    
-    
+
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Actions + Action Catalog
-# ────────────────────────────────────────────────────────────────────────────────    
+# ────────────────────────────────────────────────────────────────────────────────
 @dataclass
 class ActionSpec:
     key: str
@@ -143,7 +143,7 @@ class IntentModifier:
 
     def _get_llm(self):
         if self._llm is None:
-            from pes.handlers.generate_plan import AIResponsesLLM
+            from pes_noma.handlers.generate_plan import AIResponsesLLM
             self._llm = AIResponsesLLM(self.AGU)
         return self._llm
 
@@ -444,14 +444,14 @@ class ModifyPlan:
     def __init__(self, prompts: Optional[Dict[str, str]] = None):
         # Load config for handlers (independent of Flask)
         self.config = load_config()
-        
+
         self.AGU = None
         self.DAC = DataController(config=self.config)
         self.BPC = BlueprintController(config=self.config)
-        
+
         # Store prompts passed during initialization (from text files or database)
         self.prompts = prompts or {}
-        
+
 
     def _get_context(self) -> RequestContext:
         """Get the current request context."""
@@ -467,7 +467,7 @@ class ModifyPlan:
         for key, value in kwargs.items():
             setattr(context, key, value)
         self._set_context(context)
-    
+
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
@@ -479,12 +479,12 @@ class ModifyPlan:
             'compose_plan_light': '',
             'modify_plan': ''
         }
-        
+
         try:
             # Get all prompt records for the case_group
             if not case_group:
                 raise Exception('No case group')
-            
+
             query = {
                 'portfolio': portfolio,
                 'org': org,
@@ -496,20 +496,20 @@ class ModifyPlan:
                 'sort': 'asc'
             }
             response = self.DAC.get_a_b_query(query)
-            
+
             #response = self.DAC.get_a_b(portfolio, org, prompt_ring, limit=1000)
             if response and 'items' in response:
                 for item in response['items']:
                     # Get the key field (exact match from database)
                     key = item.get('key', '').lower()
-                    
+
                     # Get prompt text from 'prompt' field only
                     prompt_text = item.get('prompt', '')
-                    
+
                     # Strip leading whitespace (database responses have leading spaces)
                     if prompt_text:
                         prompt_text = prompt_text.lstrip()
-                    
+
                     # Map keys to prompt types using exact match only
                     if key == 'to_intent':
                         prompts['to_intent'] = prompt_text
@@ -521,8 +521,8 @@ class ModifyPlan:
                         prompts['modify_plan'] = prompt_text
         except Exception as e:
             print(f'Warning: Could not load prompts from database: {str(e)}')
-            
-        
+
+
         return prompts
 
     def _load_prompts_from_package(self, package_route: str) -> Dict[str, str]:
@@ -537,9 +537,9 @@ class ModifyPlan:
         Returns:
             Dictionary with keys: 'to_intent', 'modify_intent_delta', 'compose_plan_light', 'modify_plan'
         """
-        
+
         print('Using prompts from package')
-        
+
         prompts = {
             'to_intent': '',
             'modify_intent_delta': '',
@@ -606,14 +606,14 @@ class ModifyPlan:
         except Exception as e:
             print(f'Warning: Could not load cases from database: {e}')
         return cases
-    
+
     def _load_actions(self, portfolio: str, org: str, action_ring: str = "schd_actions") -> List[ActionSpec]:
         """
         Load action catalog from database (schd_actions ring).
         Returns a list of ActionSpec objects.
         """
         actions = []
-        
+
         try:
             # Get all action records from the ring
             response = self.DAC.get_a_b(portfolio, org, action_ring, limit=1000)
@@ -624,12 +624,12 @@ class ModifyPlan:
                     goal = item.get('goal', '')
                     tools_ref = item.get('tools_reference', '')
                     slots = item.get('slots', '')
-                    
+
                     # Parse slots field for argument definitions
                     # Format expected: JSON string with 'required' and 'optional' arrays
                     required_args = []
                     optional_args = []
-                    
+
                     if slots:
                         try:
                             # Try parsing as JSON first
@@ -638,7 +638,7 @@ class ModifyPlan:
                                 slots_data = json.loads(slots)
                             else:
                                 slots_data = slots
-                            
+
                             if isinstance(slots_data, dict):
                                 required_args = slots_data.get('required', [])
                                 optional_args = slots_data.get('optional', [])
@@ -653,13 +653,13 @@ class ModifyPlan:
                                 required_args = parts
                         except Exception as e:
                             print(f'Warning: Could not parse slots for action {name or key}: {str(e)}')
-                    
+
                     # Use goal as description, or fallback to name
                     description = goal or f"Action: {name or key}"
-                    
+
                     # Get success criteria from verification field if available
                     success_criteria_hint = item.get('verification', '')
-                    
+
                     if key:
                         action_key = key
                         actions.append(ActionSpec(
@@ -671,13 +671,13 @@ class ModifyPlan:
                         ))
         except Exception as e:
             print(f'Warning: Could not load actions from database: {str(e)}')
-            
-        
+
+
         return actions
-    
-    
+
+
     def run(self, payload):
-        
+
         '''
         Payload
         {
@@ -693,35 +693,35 @@ class ModifyPlan:
         # Initialize a new request context
         function = 'run > modify_plan'
         context = RequestContext()
-        
+
         if 'portfolio' in payload:
             context.portfolio = payload['portfolio']
         else:
             return {'success':False,'function':function,'input':payload,'output':'No portfolio provided'}
-        
+
         if 'org' in payload:
             context.org = payload['org']
         else:
             return {'success':False,'function':function,'input':payload,'output':'No org provided'}
-        
+
         if 'case_group' in payload:
             context.case_group = payload['case_group']
         else:
             return {'success':False,'function':function,'input':payload,'output':'No case group provided'}
-        
+
         if 'message' not in payload:
             return {'success':False,'function':function,'input':payload,'output':'No modification request (message) provided'}
-        
+
         if 'plan' not in payload:
             return {'success':False,'function':function,'input':payload,'output':'No existing plan provided'}
-        
+
         if '_init' in payload:
             raw = payload['_init']
             context.init = json.loads(raw) if isinstance(raw, str) else raw
         else:
             context.init = {}
-            
-            
+
+
         if 'trip' in payload:
             raw_trip = payload['trip']
             context.trip = json.loads(raw_trip) if isinstance(raw_trip, str) else raw_trip
@@ -729,11 +729,11 @@ class ModifyPlan:
             context.trip = {}
 
 
-        
+
 
         try:
             self._set_context(context)
-            
+
             self.AGU = AgentUtilities(
                 self.config,
                 context.portfolio,
@@ -742,11 +742,11 @@ class ModifyPlan:
                 'some_entity_id',
                 'some_thread'
             )
-            
+
             results = []
             print('Initializing PES>ModifyPlan')
             plan_actions = (context.init.get('plan_actions') or None) if isinstance(context.init, dict) else None
-            
+
             base_intent = payload.get('intent')
             modification_request = payload['message']
             if not base_intent or not isinstance(base_intent, dict):
@@ -771,7 +771,7 @@ class ModifyPlan:
                     patcher.apply_invalidations_for_modification(base_intent, updated_intent)
                 except ImportError:
                     pass  # inca optional: invalidate holds/bookings when intent changes
-                from pes.handlers.propose_plan import ProposePlan
+                from pes_noma.handlers.propose_plan import ProposePlan
                 propose_payload = {
                     'portfolio': context.portfolio,
                     'org': context.org,
@@ -790,10 +790,9 @@ class ModifyPlan:
             except Exception as e:
                 print(f'Intent-based regeneration failed: {e}')
                 return {'success': False, 'function': function, 'input': payload, 'output': f'ERROR:@modify_plan/run: {str(e)}'}
-            
+
         except Exception as e:
             print(f'Error during execution: {str(e)}')
             import traceback
             traceback.print_exc()
             return {'success': False, 'function': function, 'input': payload, 'output': f'ERROR:@modify_plan/run: {str(e)}'}
-
