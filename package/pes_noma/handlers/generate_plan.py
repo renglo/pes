@@ -1361,6 +1361,202 @@ class GeneratePlan:
             setattr(context, key, value)
         self._set_context(context)
 
+    def _fetch_all_attendants(self, portfolio: str, org: str) -> List[Dict[str, Any]]:
+        """Fetch all active attendants from noma_attendants with pagination."""
+        all_attendants: List[Dict[str, Any]] = []
+        lastkey = None
+        while True:
+            response = self.DAC.get_a_b(portfolio, org, 'noma_attendants', limit=100, lastkey=lastkey)
+            if not response.get('success'):
+                break
+            items = response.get('items', [])
+            all_attendants.extend([a for a in items if a.get('isActive', True)])
+            lastkey = response.get('last_id')
+            if not lastkey:
+                break
+        return all_attendants
+
+    def _find_attendant_matches(self, name: str, attendants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Case-insensitive substring match against attendant names."""
+        name_lower = name.lower().strip()
+        if not name_lower:
+            return []
+        return [
+            a for a in attendants
+            if name_lower in (a.get('name') or '').lower().strip()
+        ]
+
+    def _find_attendant_fuzzy(self, name: str, attendants: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], float]:
+        """Return the closest attendant by SequenceMatcher ratio."""
+        from difflib import SequenceMatcher
+        name_lower = name.lower().strip()
+        best: Optional[Dict[str, Any]] = None
+        best_ratio = 0.0
+        for a in attendants:
+            ratio = SequenceMatcher(None, name_lower, (a.get('name') or '').lower().strip()).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best = a
+        return best, best_ratio
+
+    def _extract_names_from_message(self, user_message: str, n_travelers: int) -> List[str]:
+        """
+        Use the AGU LLM to extract traveler names explicitly mentioned in the message.
+        Returns all explicitly mentioned names (may exceed n_travelers if the LLM found more).
+        """
+        prompt_text = f"""Extract the names of ALL travelers explicitly mentioned in the travel request below.
+Return ONLY a JSON array of strings with the names, e.g. ["Arthur", "Maria Silva"].
+If no names are mentioned return [].
+Do not invent names. Include every person explicitly named in the request.
+
+Travel request: {user_message}"""
+        try:
+            if not self.AGU:
+                raise Exception("AGU not initialized")
+            prompt = {
+                "model": self.AGU.AI_1_MODEL,
+                "messages": [{"role": "user", "content": prompt_text}],
+                "temperature": 0,
+            }
+            response = self.AGU.llm(prompt)
+            raw = (response.content if response else None) or "[]"
+            raw = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
+            names = json.loads(raw)
+            if isinstance(names, list):
+                return [n for n in names if isinstance(n, str) and n.strip()]
+        except Exception as e:
+            print(f"[generate_plan] _extract_names_from_message error: {e}")
+        return []
+
+    def _resolve_traveler_ids_in_intent(
+        self,
+        intent: Dict[str, Any],
+        user_message: str,
+        portfolio: str,
+        org: str,
+    ) -> Dict[str, Any]:
+        """
+        Replace synthetic traveler IDs (t1, t2 …) in the intent with real
+        noma_attendants IDs resolved from names mentioned in the user message.
+        """
+        party = intent.get("party") or {}
+        synthetic_ids: List[str] = list(party.get("traveler_ids") or [])
+        n_travelers = len(synthetic_ids)
+
+        if not n_travelers:
+            return intent
+
+        try:
+            attendants = self._fetch_all_attendants(portfolio, org)
+        except Exception as e:
+            print(f"[generate_plan] _fetch_all_attendants error: {e}")
+            return intent
+
+        print(f"[generate_plan] fetched {len(attendants)} attendants from noma_attendants")
+        if not attendants:
+            print(f"[generate_plan] no attendants found — skipping traveler resolution")
+            return intent
+
+        names = self._extract_names_from_message(user_message, n_travelers)
+        print(f"[generate_plan] extracted traveler names: {names}")
+
+        if not names:
+            return intent
+
+        if len(names) > len(synthetic_ids):
+            existing_nums = set()
+            for sid in synthetic_ids:
+                if sid.startswith('t') and sid[1:].isdigit():
+                    existing_nums.add(int(sid[1:]))
+            next_num = max(existing_nums, default=0) + 1
+            for _ in range(len(names) - len(synthetic_ids)):
+                while next_num in existing_nums:
+                    next_num += 1
+                new_sid = f"t{next_num}"
+                synthetic_ids.append(new_sid)
+                existing_nums.add(next_num)
+                intent["party"]["traveler_ids"].append(new_sid)
+                intent["party"].setdefault("travelers_by_id", {})[new_sid] = {"group_index": str(next_num - 1)}
+                adults_count = int((intent.get("party") or {}).get("travelers", {}).get("adults", 1))
+                intent["party"]["travelers"]["adults"] = str(adults_count + 1)
+                for seg in (intent.get("itinerary") or {}).get("segments") or []:
+                    if "traveler_ids" in seg and new_sid not in seg["traveler_ids"]:
+                        seg["traveler_ids"].append(new_sid)
+                for stay in ((intent.get("itinerary") or {}).get("lodging") or {}).get("stays") or []:
+                    if "traveler_ids" in stay and new_sid not in stay["traveler_ids"]:
+                        stay["traveler_ids"].append(new_sid)
+                next_num += 1
+            print(f"[generate_plan] Extended synthetic_ids to {synthetic_ids}")
+
+        id_map: Dict[str, Optional[str]] = {}
+        unresolved: List[Dict[str, Any]] = []
+
+        for i, synthetic_id in enumerate(synthetic_ids):
+            name = names[i] if i < len(names) else None
+            if not name:
+                continue
+
+            exact = self._find_attendant_matches(name, attendants)
+
+            if len(exact) == 1:
+                id_map[synthetic_id] = exact[0]['_id']
+                print(f"[generate_plan] {synthetic_id} → {exact[0]['_id']} (name: {exact[0].get('name')})")
+            elif len(exact) > 1:
+                alternatives = [{"id": a["_id"], "name": a.get("name", ""), "email": a.get("email", "")} for a in exact]
+                unresolved.append({
+                    "synthetic_id": synthetic_id,
+                    "input_name": name,
+                    "type": "multiple_matches",
+                    "alternatives": alternatives,
+                    "message": f'Multiple attendants match "{name}": {", ".join(a["name"] for a in alternatives)}. Please clarify which one.',
+                })
+                print(f"[generate_plan] {synthetic_id}: ambiguous name '{name}'")
+            else:
+                best, ratio = self._find_attendant_fuzzy(name, attendants)
+                if best and ratio >= 0.8:
+                    id_map[synthetic_id] = best['_id']
+                    print(f"[generate_plan] {synthetic_id} → {best['_id']} (fuzzy {ratio:.2f}, name: {best.get('name')})")
+                else:
+                    unresolved.append({
+                        "synthetic_id": synthetic_id,
+                        "input_name": name,
+                        "type": "not_found",
+                        "message": f'No attendant found matching "{name}".',
+                    })
+                    print(f"[generate_plan] {synthetic_id}: no match for '{name}'")
+
+        if not id_map:
+            if unresolved:
+                intent["unresolved_travelers"] = unresolved
+            return intent
+
+        def _replace_ids(ids: List[str]) -> List[str]:
+            return [id_map.get(tid, tid) for tid in ids]
+
+        intent["party"]["traveler_ids"] = _replace_ids(synthetic_ids)
+
+        old_by_id: Dict[str, Any] = party.get("travelers_by_id") or {}
+        new_by_id: Dict[str, Any] = {}
+        for syn, data in old_by_id.items():
+            real = id_map.get(syn, syn)
+            new_by_id[real] = data
+        intent["party"]["travelers_by_id"] = new_by_id
+
+        for seg in (intent.get("itinerary") or {}).get("segments") or []:
+            if "traveler_ids" in seg:
+                seg["traveler_ids"] = _replace_ids(seg["traveler_ids"])
+
+        for stay in ((intent.get("itinerary") or {}).get("lodging") or {}).get("stays") or []:
+            if "traveler_ids" in stay:
+                stay["traveler_ids"] = _replace_ids(stay["traveler_ids"])
+
+        if unresolved:
+            intent["unresolved_travelers"] = unresolved
+
+        return intent
+
+    # ────────────────────────────────────────────────────────────────────────────
+
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
@@ -1786,6 +1982,15 @@ class GeneratePlan:
                                        facts=retrieved.get('facts', []), skills=retrieved.get('skills', []))
             if not intent:
                 return {'success': False, 'function': function, 'input': payload, 'output': 'Intent could not be extracted'}
+
+            # Step 1b: Resolve synthetic traveler IDs to real noma_attendants IDs
+            intent = self._resolve_traveler_ids_in_intent(
+                intent,
+                user_message,
+                context.portfolio,
+                context.org,
+            )
+            print(f"[generate_plan] Intent after traveler resolution: traveler_ids={intent.get('party', {}).get('traveler_ids')}")
 
             self.AGU.mutate_workspace(
                 {'request_intent': intent},
