@@ -6,7 +6,7 @@ Custom handlers, blueprints, and utilities for the PES platform
 from setuptools import setup, find_packages
 
 setup(
-    name="pes_noma-mod",
+    name="pes-noma-mod",
     version="1.0.0",
     description="PES custom handlers, blueprints, and utilities - ",
     author="PES Team",
@@ -26,7 +26,3 @@ setup(
         "Programming Language :: Python :: 3.12",
     ],
 )
-
-
-
-

@@ -1,13 +1,25 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple, Protocol, Union
-import json, math, time, uuid, re
+import copy
+import importlib.resources
+import json
+import math
+import re
+import time
+import uuid
 import os
 from openai import OpenAI
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 from collections import Counter
 from decimal import Decimal
 from datetime import datetime
-import yaml
+from zoneinfo import ZoneInfo
 
 from renglo.agent.agent_utilities import AgentUtilities
 from renglo.common import load_config
@@ -16,6 +28,151 @@ from renglo.blueprint.blueprint_controller import BlueprintController
 
 from contextvars import ContextVar
 
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Intent schema (PES domain-agnostic; single source of truth for request characteristics)
+# ────────────────────────────────────────────────────────────────────────────────
+
+
+def new_intent(intent_id: str, user_message: str) -> Dict[str, Any]:
+    """Create a fresh intent template. Schema: renglo.intent.v1"""
+    now = int(time.time())
+    return {
+        "schema": "renglo.intent.v1",
+        "intent_id": intent_id,
+        "created_at": now,
+        "updated_at": now,
+        "request": {
+            "user_message": user_message,
+            "locale": "en-US",
+            "timezone": "America/New_York",
+            "now_iso": None,
+            "now_date": None,
+        },
+        "status": {
+            "phase": "intake",
+            "state": "collecting_requirements",
+            "missing_required": [],
+            "assumptions": [],
+            "notes": [],
+        },
+        "party": {
+            "travelers": {"adults": 0, "children": 0, "infants": 0},
+            "traveler_ids": [],
+            "travelers_by_id": {},
+            "traveler_profile_ids": [],
+            "guests": [],
+            "contact": {"email": None, "phone": None},
+        },
+        "itinerary": {
+            "trip_type": None,
+            "segments": [],
+            "day_trips": [],
+            "converging": False,
+            "lodging": {
+                "needed": True,
+                "check_in": None,
+                "check_out": None,
+                "location_hint": None,
+                "stays": [],
+            },
+            "ground": {"needed": False},
+        },
+        "preferences": {"flight": {}, "hotel": {}},
+        "constraints": {"budget_total": None, "currency": "USD", "refundable_preference": "either"},
+        "policy": {"rules": {"require_user_approval_to_purchase": True, "holds_allowed_without_approval": True}},
+        "working_memory": {
+            "flight_quotes": [],
+            "hotel_quotes": [],
+            "flight_quotes_by_segment": [],
+            "hotel_quotes_by_stay": [],
+            "ranked_bundles": [],
+            "risk_report": None,
+            "selected": {"bundle_id": None, "flight_option_id": None, "hotel_option_id": None, "flight_option_ids": [], "hotel_option_ids": []},
+            "holds": [],
+            "bookings": [],
+        },
+        "audit": {"events": []},
+    }
+
+
+def intent_for_retrieval(ti: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract retrieval-relevant fields from intent. Returns dict; serialize with json.dumps() when needed."""
+    out: Dict[str, Any] = {}
+    party = ti.get("party") or {}
+    travelers = party.get("travelers") or {}
+    if travelers:
+        out["party"] = {"travelers": travelers}
+        if party.get("traveler_ids"):
+            out["party"]["traveler_ids"] = party["traveler_ids"]
+        if party.get("travelers_by_id"):
+            out["party"]["travelers_by_id"] = party["travelers_by_id"]
+    iti = ti.get("itinerary") or {}
+    if iti.get("trip_type"):
+        out["trip_type"] = iti["trip_type"]
+    if iti.get("converging"):
+        out["converging"] = True
+    segs = iti.get("segments") or []
+    if segs:
+        out["segments"] = []
+        for s in segs:
+            seg = {
+                "origin": (s.get("origin") or {}).get("code") if isinstance(s.get("origin"), dict) else s.get("origin"),
+                "destination": (s.get("destination") or {}).get("code") if isinstance(s.get("destination"), dict) else s.get("destination"),
+                "depart_date": s.get("depart_date"),
+                "passengers": s.get("passengers"),
+            }
+            if s.get("traveler_ids"):
+                seg["traveler_ids"] = s["traveler_ids"]
+            out["segments"].append(seg)
+    lod = iti.get("lodging") or {}
+    if lod.get("stays"):
+        out["stays"] = lod["stays"]
+    elif lod.get("check_in") or lod.get("check_out"):
+        out["lodging"] = {"check_in": lod.get("check_in"), "check_out": lod.get("check_out"), "location_hint": lod.get("location_hint")}
+    if lod.get("number_of_nights") is not None:
+        out.setdefault("lodging", {})["number_of_nights"] = lod["number_of_nights"]
+    if "needed" in lod:
+        out.setdefault("lodging", {})["needed"] = lod["needed"]
+    extras = ti.get("extras") or {}
+    if extras.get("activities"):
+        out["activities"] = extras["activities"]
+    if extras.get("itinerary"):
+        out["itinerary"] = extras["itinerary"]
+    if extras.get("travelers"):
+        out["converging_travelers"] = extras["travelers"]
+    prefs = ti.get("preferences") or {}
+    if prefs:
+        out["preferences"] = prefs
+    constraints = ti.get("constraints") or {}
+    if constraints and any(v for v in constraints.values() if v):
+        out["constraints"] = constraints
+    return out
+
+
+def intent_for_plan(ti: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract plan-relevant fields from intent for prompts. Returns dict; serialize with json.dumps() when needed."""
+    return {
+        "party": ti.get("party") or {},
+        "itinerary": ti.get("itinerary") or {},
+        "extras": ti.get("extras") or {},
+        "preferences": ti.get("preferences") or {},
+        "constraints": ti.get("constraints") or {},
+    }
+
+def intent_destination(ti: Dict[str, Any]) -> Optional[str]:
+    """Extract primary destination for retrieval filters."""
+    segs = (ti.get("itinerary") or {}).get("segments") or []
+    if segs:
+        d = segs[0].get("destination")
+        if isinstance(d, dict):
+            return d.get("code")
+        return d if isinstance(d, str) else None
+    lod = (ti.get("itinerary") or {}).get("lodging") or {}
+    stays = lod.get("stays") or []
+    if stays:
+        return stays[0].get("location_code")
+    return lod.get("location_hint")
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -31,27 +188,13 @@ class RequestContext:
     query_params: Dict[str, Any] = field(default_factory=dict)
     case_group: str = ''
     init: Dict[str, Any] = field(default_factory=dict)
-    
-    
+
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Core data shapes
 # ────────────────────────────────────────────────────────────────────────────────
 
-@dataclass
-class Signature:
-    domain: Optional[str] = None
-    goal: Optional[str] = None
-    destination: Optional[str] = None
-    party: Optional[Dict[str, Any]] = None
-    dates: Optional[Dict[str, str]] = None
-    constraints: Optional[Dict[str, Any]] = None
-    preferences: Optional[Dict[str, Any]] = None
-    activities: Optional[List[Dict[str, Any]]] = None  # Requested activities/services
-    extras: Dict[str, Any] = field(default_factory=dict)
-
-    def to_text(self) -> str:
-        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
 
 @dataclass
 class PlanStep:
@@ -73,12 +216,12 @@ class Plan:
 @dataclass
 class Case:
     id: str
-    signature_text: str
+    intent_text: str
     plan: Plan
     outcomes: Dict[str, Any]
     context: Dict[str, Any]
     created_at: float = field(default_factory=time.time)
-    
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Embedding + cosine (simple; swap with your prod embedder)
@@ -125,8 +268,8 @@ def cosine(a: List[float], b: List[float]) -> float:
     na = math.sqrt(sum(x*x for x in a[:n])) or 1.0
     nb = math.sqrt(sum(x*x for x in b[:n])) or 1.0
     return dot/(na*nb)
-    
-    
+
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Vector DB (mock)
@@ -166,9 +309,9 @@ class VectorDB:
                     s += 0.5  # Boost matching items
             scored.append((it, s))
         scored.sort(key=lambda x: x[1], reverse=True)
-        return [x[0] for x in scored[:k]] 
-    
-    
+        return [x[0] for x in scored[:k]]
+
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # LLM client (OpenAI-backed) with task-specific Structured Outputs
@@ -211,62 +354,125 @@ class AIResponsesLLM:
 
     def _schema_for_task(self, task: str) -> Dict[str, Any]:
         # Minimal but strict schemas for the agent's JSON outputs
-        if task == "TO_SIGNATURE":
+        if task == "TO_TRIP_INTENT":
             return {
-                "name": "Signature",
+                "name": "TripIntentExtract",
                 "schema": {
                     "type": "object",
                     "properties": {
-                        "domain": {"type": "string"},
-                        "goal": {"type": "string"},
-                        "destination": {"type": ["string","null"]},
-                        "party": {
-                            "anyOf": [
-                                {"type": "object", "additionalProperties": False},
-                                {"type": "null"}
-                            ]
-                        },
+                        "origin": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "destination": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "trip_type": {"anyOf": [{"type": "string", "enum": ["one_way", "round_trip", "multi_city", "single_destination", "day_trip", "converging"]}, {"type": "null"}]},
                         "dates": {
-                            "anyOf": [
-                                {"type": "object", "additionalProperties": False},
-                                {"type": "null"}
-                            ]
+                            "type": "object",
+                            "properties": {
+                                "departure_date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                "return_date": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                            },
+                            "additionalProperties": False
                         },
-                        "constraints": {
-                            "anyOf": [
-                                {"type": "object", "additionalProperties": False},
-                                {"type": "null"}
-                            ]
-                        },
-                        "preferences": {
-                            "anyOf": [
-                                {"type": "object", "additionalProperties": False},
-                                {"type": "null"}
-                            ]
-                        },
-                        "activities": {
-                            "anyOf": [
-                                {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "additionalProperties": False
+                        "segments": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "origin": {"type": "string"},
+                                    "destination": {"type": "string"},
+                                    "depart_date": {"type": "string"},
+                                    "passengers": {"type": "integer"},
+                                    "transport_mode": {
+                                        "type": "string",
+                                        "enum": ["flight", "train", "bus"],
+                                        "description": "Transport mode for this segment: flight (default), train, or bus"
+                                    },
+                                    "traveler_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "For converging: e.g. [\"t1\",\"t2\",\"t3\"]"
                                     }
                                 },
-                                {"type": "null"}
-                            ]
+                                "additionalProperties": True
+                            }
                         },
-                        "extras": {
-                            "anyOf": [
-                                {"type": "object", "additionalProperties": False},
-                                {"type": "null"}
-                            ]
-                        }
+                        "stays": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "location_code": {"type": "string"},
+                                    "check_in": {"type": "string"},
+                                    "check_out": {"type": "string"},
+                                    "number_of_guests": {"type": "integer"},
+                                    "traveler_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "For converging: e.g. [\"t1\",\"t2\",\"t3\"]"
+                                    }
+                                },
+                                "additionalProperties": True
+                            }
+                        },
+                        "travelers": {
+                            "type": "object",
+                            "properties": {
+                                "adults": {"type": "integer"},
+                                "children": {"type": "integer"},
+                                "infants": {"type": "integer"}
+                            },
+                            "additionalProperties": False
+                        },
+                        "lodging": {
+                            "type": "object",
+                            "properties": {
+                                "needed": {"type": "boolean"},
+                                "check_in": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                "check_out": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                "number_of_nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+                            },
+                            "additionalProperties": False
+                        },
+                        "activities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "location": {"type": "string"},
+                                    "when": {"type": "string"}
+                                },
+                                "additionalProperties": False
+                            }
+                        },
+                        "itinerary": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": {"type": "string"},
+                                    "to": {"type": "string"},
+                                    "date": {"type": "string"}
+                                },
+                                "additionalProperties": False
+                            }
+                        },
+                        "converging_travelers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "count": {"type": "integer"},
+                                    "origin": {"type": "string"},
+                                    "arrival_date": {"type": "string"}
+                                },
+                                "additionalProperties": False
+                            }
+                        },
+                        "extras": {"type": "object", "additionalProperties": True}
                     },
-                    "required": ["domain","goal","destination","party","dates","constraints","preferences","activities","extras"],
-                    "additionalProperties": False
+                    "additionalProperties": True
                 },
-                "strict": True
+                "strict": False
             }
         if task in ("ADAPT_PLAN", "COMPOSE_PLAN", "INCREMENT_PLAN"):
             return {
@@ -353,6 +559,36 @@ class AIResponsesLLM:
                 },
                 "strict": True
             }
+        if task == "MODIFY_INTENT_DELTA":
+            return {
+                "name": "ModifyIntentDelta",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "changes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["extend_stay", "shorten_stay", "add_side_trip", "change_dates"]},
+                                    "until_date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                    "add_nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                                    "remove_nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                                    "city": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                    "nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                                    "departure_date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                    "return_date": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                                },
+                                "required": ["type"],
+                                "additionalProperties": True
+                            }
+                        }
+                    },
+                    "required": ["changes"],
+                    "additionalProperties": False
+                },
+                "strict": False
+            }
         # Default permissive JSON object
         return {
             "name": "GenericJSON",
@@ -385,7 +621,7 @@ class AIResponsesLLM:
                 enhanced_prompt = f"{prompt}\n\nPlease respond with valid JSON matching this schema:\n{schema_str}"
                 response_kwargs["response_format"] = {"type": "json_object"}
                 response_kwargs["messages"][0]["content"] = enhanced_prompt
-        
+
         resp = self.AGU.llm(response_kwargs)
         return self._resp_text(resp)
 
@@ -395,7 +631,7 @@ class AIResponsesLLM:
         """
         task = self._detect_task(prompt)
         schema = self._schema_for_task(task)
-        
+
         # Prepare the API call
         if self._supports_structured_outputs():
             # Use structured outputs for newer models
@@ -416,7 +652,7 @@ class AIResponsesLLM:
                 'response_format': {"type": "json_object"}
             }
             resp = self.AGU.llm(request_params)
-        
+
         txt = self._resp_text(resp)
         try:
             return json.loads(txt)
@@ -430,10 +666,10 @@ class AIResponsesLLM:
                     pass
             # Fallback empty object
             return {}
-        
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Actions + Action Catalog
-# ────────────────────────────────────────────────────────────────────────────────    
+# ────────────────────────────────────────────────────────────────────────────────
 @dataclass
 class ActionSpec:
     key: str
@@ -456,15 +692,13 @@ def eval_bool(expr: str, context: Dict[str, Any]) -> bool:
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Planner
+# IntentGenerator (core engine: message → intent)
 # ────────────────────────────────────────────────────────────────────────────────
 
-class Planner:
+class IntentGenerator:
     """
-    v2.2:
-      - LLM-crafted signature, plan adaptation/composition, and selection
-      - VectorDB retrieval for cases, facts, skills
-      - Action catalog provided to LLM; validator enforces action/arg correctness
+    Core engine for message → intent. VectorDB retrieval + LLM intent extraction.
+    Plan composition (intent → plan) lives in ProposePlan handler.
     """
     def __init__(self,
                  vdb: VectorDB,
@@ -475,26 +709,26 @@ class Planner:
         self.llm = llm
         self.action_catalog = action_catalog
         self.prompts = prompts or {}
-    
+
     def _replace_tokens(self, prompt: str, replacements: Dict[str, Any]) -> str:
         """
         Replace tokens in prompt template with actual values.
         Supports #token# format (new) and {token} format (legacy).
         JSON tokens are automatically wrapped in ```json ... ``` code blocks.
-        
+
         Args:
             prompt: Template string with tokens
             replacements: Dictionary mapping token names to values
-            
+
         Returns:
             Prompt with all tokens replaced
         """
         # Tokens that should be wrapped in JSON code blocks
         json_tokens = {
-            'sig_text', 'example_cases', 'fact_texts', 'catalog_summary',
-            'catalog', 'skills', 'activities_requested', 'plan_details'
+            'intent_text', 'example_cases', 'fact_texts', 'catalog_summary',
+            'catalog', 'skills', 'plan_examples', 'activities_requested', 'plan_details', 'intent_examples'
         }
-        
+
         for token, value in replacements.items():
             # Handle #token# format (new, preferred)
             token_placeholder = '#' + token + '#'
@@ -506,7 +740,7 @@ class Planner:
                     # Simple replacement for non-JSON tokens
                     replacement = str(value)
                 prompt = prompt.replace(token_placeholder, replacement)
-            
+
             # Legacy support for {token} and {{token}} formats
             legacy_placeholder1 = '{' + token + '}'
             legacy_placeholder2 = '{{' + token + '}}'
@@ -517,127 +751,578 @@ class Planner:
                     replacement = str(value)
                 prompt = prompt.replace(legacy_placeholder1, replacement)
                 prompt = prompt.replace(legacy_placeholder2, replacement)
-        
+
         return prompt
 
-    # 1) Signature via LLM
-    def to_signature(self, req: Dict[str, Any]) -> Signature:
-        print('Turning your request into a structured signature...')
-        
-        # Extract the actual request text
-        request_text = req.get("request", "") if isinstance(req.get("request"), str) else json.dumps(req)
-        print(f'[DEBUG] Request text: {request_text}')
-        
-        # Current time and date
-        current_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        print(f'[DEBUG] Current time computed: {current_time}')
-        
-        # Use prompt from database if available, otherwise use default
-        prompt_template = self.prompts.get('to_signature', '')
+    # 1) Trip intent extraction via LLM - examples inform extraction (intent should be explicit for plan)
+    def to_intent(self, req: Dict[str, Any], intent_id: Optional[str] = None,
+                  cases: Optional[List[VDBItem]] = None, facts: Optional[List[VDBItem]] = None,
+                  skills: Optional[List[VDBItem]] = None) -> Optional[Dict[str, Any]]:
+        """Extract requirements from user message. Examples from VDB inform how to structure the intent."""
+        print('Extracting trip intent from user request...')
+        user_message = req.get("request", "") if isinstance(req.get("request"), str) else json.dumps(req)
+        if isinstance(user_message, dict):
+            user_message = req.get("message", "") or json.dumps(req)
+        user_message = str(user_message).strip() if user_message else ""
+        print(f'[DEBUG] User message: {user_message}')
+
+        try:
+            tz = ZoneInfo("America/New_York")
+        except Exception:
+            tz = ZoneInfo("America/New_York")
+        now_dt = datetime.now(tz)
+        now_iso = now_dt.isoformat()
+        now_date = now_dt.strftime("%Y-%m-%d")
+
+        intent = new_intent(intent_id or f"pes_{uuid.uuid4().hex[:12]}", user_message)
+        intent["request"]["now_iso"] = now_iso
+        intent["request"]["now_date"] = now_date
+
+        intent_examples = ""
+        if cases:
+            examples = []
+            for c in cases[:3]:
+                try:
+                    obj = json.loads(c.text)
+                    ex_message = obj.get("description","")
+                    ex_intent = obj.get("intent", {})
+                    ex_plan = obj.get("plan",{})
+                    if ex_intent:
+                        examples.append({"message":ex_message,"intent": ex_intent})
+                except Exception:
+                    pass
+            if examples:
+                intent_examples = json.dumps(examples, indent=2)
+
+        fact_texts = ""
+        if facts:
+            fact_texts = json.dumps([{"text": f.text, "meta": f.meta} for f in facts[:4]], indent=2)
+
+        prompt_template = self.prompts.get('to_intent', '')
         if prompt_template:
-            print(f'[DEBUG] Using prompt from YAML (length: {len(prompt_template)} chars)')
-            # Replace tokens with computed values
+            print('Using "to_intent" prompt template')
             replacements = {
-                'request_text': request_text,
-                'current_time': current_time
+                'request_text': user_message, 'current_time': now_iso, 'now_date': now_date,
+                'intent_examples': intent_examples or '[]', 'fact_texts': fact_texts or '[]'
             }
-            print(f'[DEBUG] Token replacements: {replacements}')
             prompt = self._replace_tokens(prompt_template, replacements)
-            # Verify token replacement
-            if '#current_time#' in prompt or '{current_time}' in prompt:
-                print(f'[WARNING] Token #current_time# or {{current_time}} still present in prompt after replacement!')
-            if '#request_text#' in prompt or '{request_text}' in prompt:
-                print(f'[WARNING] Token #request_text# or {{request_text}} still present in prompt after replacement!')
-            print(f'[DEBUG] Prompt preview (first 500 chars): {prompt[:500]}...')
+            if '#intent_examples#' not in prompt_template and intent_examples:
+                prompt += f"\n\nEXAMPLE INTENTS (learn structure from these):\n```json\n{intent_examples}\n```"
         else:
-            print('[WARNING] No prompt template found, using fallback hardcoded prompt')
-            # Fallback to default hardcoded prompt (for backward compatibility)
-            prompt = f"""
-            You are a systems normalizer for an experience-retrieval planning agent.
-            TASK: TO_SIGNATURE
-            Goal: Analyze the user's request and extract ALL facts and details into a structured Signature object.
-            
-            CRITICAL: Read the USER REQUEST carefully and extract ALL information mentioned, including:
-            - Entities (people, places, objects, organizations)
-            - Actions and activities requested
-            - Dates, times, and durations
-            - Quantities and measurements
-            - Constraints and requirements
-            - Preferences and specifications
-            - Relationships between entities
-            - Any other relevant facts
-            
-            Return ONLY a compact JSON object with these standard keys:
-            ["domain", "goal", "destination", "party", "dates", "constraints", "preferences", "activities", "extras"]
-            
-            FIELD DESCRIPTIONS:
-            - domain: The domain or category this request belongs to (e.g., "travel", "procurement", "logistics", etc.)
-            - goal: Brief description of the main objective or purpose
-            - destination: Primary target location, entity, or endpoint
-            - party: Object describing participants (count, roles, attributes)
-            - dates: Object with temporal information (start, end, duration, deadlines)
-            - constraints: Array of limitations, requirements, or restrictions
-            - preferences: Array of desired attributes, options, or specifications
-            - activities: Array of requested actions, services, or tasks with structured details
-            - extras: Object for any additional domain-specific or context-specific information
-            
-            EXTRACTION RULES:
-            - Extract ALL facts mentioned in the request
-            - Structure information logically into the appropriate fields
-            - Use arrays for multiple items (activities, constraints, preferences)
-            - Use objects for structured data (party, dates, extras)
-            - If a field doesn't apply, set it to null or an empty array/object
-            - Preserve all quantitative and qualitative details
-            
-            DATES FORMAT:
-            - Convert relative dates to approximate YYYY-MM-DD format when possible
-            - For durations, calculate end dates from start dates
-            - If no specific date mentioned, use "estimated_date" or null
-            - Consider the current time and date when scheduling
-            - Current time is : "{current_time}"
-            
-            USER REQUEST TEXT:
-            "{request_text}"
-            
-            ANALYZE THE REQUEST ABOVE AND EXTRACT ALL FACTS into the structured Signature format.
-        """
-        # Note: Token replacement is already handled by _replace_tokens() above
-        # This fallback section uses hardcoded prompt with old format for backward compatibility
+            # FALLBACK: used when pes_prompts.to_intent is empty; domain-specific (trips)
+            print('Using default prompt')
+            prompt = f"""You are a travel requirements extractor. Extract trip details from the user message.
+
+Time context: Today is {now_date} ({now_iso}). Use YYYY-MM-DD for all dates. Dates must be on or after today.
+
+TRIP TYPES:
+- single_destination: Origin → Destination → Origin with overnight stay (default when origin+dest+lodging)
+- round_trip: Same as single_destination (use interchangeably)
+- day_trip: Same-day return, NO hotel (origin → dest → origin same day)
+- multi_city: A → B → C → ... → A (multiple cities, use "segments" and "itinerary")
+- converging: Multiple groups from different origins meeting at one destination (use "converging_travelers")
+- lodging_only: Hotel/lodging only, NO flights needed. Use when user asks only for hotel stay without mentioning flights or origin city. Requires: city/destination, check-in date, number of nights, number of guests. Origin and segments should be null/empty.
+
+TRANSPORT MODES:
+- "flight" (default): air travel between airports. Use IATA airport codes for origin/destination.
+- "train": rail travel between cities/stations. Use city names (e.g., "Prague", "Bratislava", "Vienna").
+- "bus": bus travel between cities/stations. Use city names.
+- When the user mentions "train", "rail", "bus", "coach", "ground transport", set transport_mode accordingly in EACH segment.
+- If transport mode is not mentioned, default to "flight".
+
+RULES:
+- Origin/destination for flights: use IATA airport codes when possible (JFK, EWR, SFO, LAX, MIA, MCO, DFW, GRU, etc.)
+- Origin/destination for train/bus: use city names (e.g., "Prague", "Bratislava", "Vienna", "Budapest")
+- travelers: {{"adults": N, "children": 0, "infants": 0}} - adults required
+- For "X days in Y" or "3 nights": check_out = check_in + nights; lodging.number_of_nights = X
+- Multi-city: output "segments" (one per transport leg) and "itinerary" [{{"from":"City","to":"City","date":"YYYY-MM-DD"}}]
+- Day trip: same date for outbound and return, lodging.needed = false, no stays
+- Lodging only: when user asks ONLY for hotel (no flights mentioned, no origin city), set trip_type to "lodging_only",
+  origin to null, segments to [], and populate stays with location_code (city name or IATA code), check_in, check_out, number_of_guests.
+  Set lodging.needed = true. If number of guests not specified, assume 1 adult.
+- Activities: Extract ALL requested (city_tour, restaurant, day_trip, theater, museum, spa, conference, meeting)
+  Format: [{{"type":"city_tour","description":"guided tour","location":"City"}}]
+- Converging: converging_travelers = [{{"count":N,"origin":"City","arrival_date":"YYYY-MM-DD"}}]
+  - For converging: create SEPARATE stays per group (each with own check_in/check_out, number_of_guests=count)
+  - Each segment and stay MUST have explicit passengers/number_of_guests
+
+TASK: TO_TRIP_INTENT
+Return ONLY valid JSON:
+{{
+  "origin": "IATA or city name",
+  "destination": "IATA or city name",
+  "trip_type": "single_destination|round_trip|one_way|day_trip|multi_city|converging|lodging_only or null",
+  "dates": {{"departure_date": "YYYY-MM-DD or null", "return_date": "YYYY-MM-DD or null"}},
+  "segments": [{{"origin": "IATA or city", "destination": "IATA or city", "depart_date": "YYYY-MM-DD", "passengers": N, "transport_mode": "flight|train|bus"}}],
+  "stays": [{{"location_code": "IATA or city", "check_in": "YYYY-MM-DD", "check_out": "YYYY-MM-DD", "number_of_guests": N}}],
+  "travelers": {{"adults": 1, "children": 0, "infants": 0}},
+  "lodging": {{"needed": true, "check_in": "YYYY-MM-DD or null", "check_out": "YYYY-MM-DD or null", "number_of_nights": N or null}},
+  "activities": [{{"type": "activity_type", "description": "details", "location": "where"}}],
+  "itinerary": [{{"from": "City", "to": "City", "date": "YYYY-MM-DD"}}],
+  "converging_travelers": [{{"count": N, "origin": "City", "arrival_date": "YYYY-MM-DD"}}],
+  "extras": {{}}
+}}
+
+User message: {user_message}
+"""
+            if intent_examples:
+                prompt += f"\n\nEXAMPLE INTENTS (learn structure from these similar cases):\n```json\n{intent_examples}\n```"
+            if fact_texts:
+                prompt += f"\n\nRELEVANT FACTS:\n```json\n{fact_texts}\n```"
+
+        #Run the prompt
+        print(f'[to_intent] prompt > LLM >> {prompt}')
         data = self.llm.complete_json(prompt)
-        
         if not data:
-            print('[ERROR] LLM returned no data for signature')
-            return False
-        
-        print('[DEBUG] LLM response for signature:', json.dumps(data, indent=2))
-        print('Parsed signature:', json.dumps(data, indent=2))
-        
-        # Filter to only valid Signature fields
-        valid_fields = {'domain', 'goal', 'destination', 'party', 'dates', 'constraints', 'preferences', 'activities', 'extras'}
-        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
-        
-        return Signature(**filtered_data)
+            print('[ERROR] LLM returned no data for intent')
+            return None
 
-    # 2) Retrieval via VectorDB
-    def retrieve(self, sig: Signature, k_cases: int = 4, k_facts: int = 4, k_skills: int = 6):
-        print('Retrieving cases, fact and skills from agent experience...')
-        query = sig.to_text()
-        filters = {"destination": (sig.destination or None)}
-        filt = {k:v for k, v in filters.items() if v}
-        cases = self.vdb.search(query=query, kind="case", k=k_cases, filters=filt)
-        facts = self.vdb.search(query=query, kind="fact", k=k_facts, filters=filt)
-        skills = self.vdb.search(query=query, kind="skill", k=k_skills, filters=filt)
+        print('[DEBUG] LLM results:', json.dumps(data, indent=2))
+        extracted = self._merge_extract_into_intent(intent, data, now_date)
+        return extracted
 
+    def _merge_extract_into_intent(self, intent: Dict[str, Any], extracted: Dict[str, Any], now_date: str) -> Dict[str, Any]:
+        """Merge LLM-extracted fields into full intent."""
+        def clamp_date(d: Optional[str]) -> Optional[str]:
+            if not d or not isinstance(d, str) or len(d) != 10:
+                return d
+            return d if d >= now_date else now_date
+
+        travelers = extracted.get("travelers")
+        if isinstance(travelers, dict) and travelers:
+            t = dict(travelers)
+            for key in ("adults", "children", "infants"):
+                if key in t and t[key] is not None:
+                    try:
+                        t[key] = int(t[key])
+                    except (TypeError, ValueError):
+                        t[key] = 1 if key == "adults" else 0
+            intent.setdefault("party", {})["travelers"] = t
+
+        origin = extracted.get("origin")
+        dest = extracted.get("destination")
+        dates = extracted.get("dates") or {}
+        extracted_segs = extracted.get("segments") or []
+        lod = extracted.get("lodging") or {}
+        trip_type = extracted.get("trip_type")
+
+        if trip_type:
+            intent.setdefault("itinerary", {})["trip_type"] = trip_type
+
+        def _total_travelers(t: Dict[str, Any]) -> int:
+            if not t:
+                return 1
+            return int(t.get("adults", 0) or 0) + int(t.get("children", 0) or 0) + int(t.get("infants", 0) or 0)
+
+        def _build_traveler_ids() -> Tuple[List[str], List[List[str]], Dict[str, Dict[str, Any]]]:
+            """Build traveler_ids, traveler_ids_by_group (for converging), and travelers_by_id."""
+            by_id: Dict[str, Dict[str, Any]] = {}
+            ids_list: List[str] = []
+            ids_by_group: List[List[str]] = []
+            if converging:
+                idx = 0
+                for gi, ct in enumerate(converging):
+                    n = int(ct.get("count", 0) or 0)
+                    group_ids = []
+                    for _ in range(n):
+                        tid = f"t{idx + 1}"
+                        ids_list.append(tid)
+                        group_ids.append(tid)
+                        by_id[tid] = {
+                            "group_index": gi,
+                            "origin": ct.get("origin"),
+                            "arrival_date": ct.get("arrival_date"),
+                        }
+                        idx += 1
+                    ids_by_group.append(group_ids)
+            else:
+                n = _total_travelers(travelers) if isinstance(travelers, dict) else 1
+                group_ids = [f"t{i + 1}" for i in range(n)]
+                ids_list = group_ids
+                ids_by_group = [group_ids]
+                for i, tid in enumerate(group_ids):
+                    by_id[tid] = {"group_index": 0}
+            return ids_list, ids_by_group, by_id
+
+        segs: List[Dict[str, Any]] = []
+        converging = extracted.get("converging_travelers") or []
+        default_passengers = _total_travelers(travelers) if isinstance(travelers, dict) else 1
+        traveler_ids_list, traveler_ids_by_group, travelers_by_id = _build_traveler_ids()
+        intent.setdefault("party", {})["traveler_ids"] = traveler_ids_list
+        intent.setdefault("party", {})["travelers_by_id"] = travelers_by_id
+        if extracted_segs:
+            for i, es in enumerate(extracted_segs):
+                o = es.get("origin") or es.get("origin_code")
+                d = es.get("destination") or es.get("destination_code")
+                o_code = o if isinstance(o, str) else (o.get("code") if isinstance(o, dict) else None)
+                d_code = d if isinstance(d, str) else (d.get("code") if isinstance(d, dict) else None)
+                depart = es.get("depart_date")
+                if depart:
+                    depart = clamp_date(depart)
+                pax = es.get("passengers")
+                if pax is None and converging:
+                    o_upper = str(o_code).upper() if o_code else ""
+                    for ct in converging:
+                        orig = (ct.get("origin") or "").upper()
+                        if len(orig) == 3 and o_upper == orig:
+                            pax = int(ct.get("count", 0) or 0)
+                            break
+                        if orig and o_upper and orig in o_upper:
+                            pax = int(ct.get("count", 0) or 0)
+                            break
+                if pax is None:
+                    pax = default_passengers
+                raw_tids = es.get("traveler_ids") if isinstance(es.get("traveler_ids"), list) else []
+                valid_tids = set(traveler_ids_list)
+                seg_tids = [t for t in raw_tids if t in valid_tids] if raw_tids else []
+                if not seg_tids and converging:
+                    o_upper = str(o_code).upper() if o_code else ""
+                    d_upper = str(d_code).upper() if d_code else ""
+                    for gi, ct in enumerate(converging):
+                        orig = (ct.get("origin") or "").upper()
+                        if (len(orig) == 3 and o_upper == orig) or (orig and o_upper and orig in o_upper):
+                            seg_tids = traveler_ids_by_group[gi] if gi < len(traveler_ids_by_group) else []
+                            break
+                        if (len(orig) == 3 and d_upper == orig) or (orig and d_upper and orig in d_upper):
+                            seg_tids = traveler_ids_by_group[gi] if gi < len(traveler_ids_by_group) else []
+                            break
+                    origins_set = {(ct.get("origin") or "").upper()[:3] for ct in converging if ct.get("origin")}
+                    is_meeting_point = o_upper and o_upper not in origins_set and len(o_upper) == 3
+                    if not seg_tids and is_meeting_point:
+                        seg_tids = traveler_ids_list
+                if not seg_tids and not converging:
+                    seg_tids = traveler_ids_list
+                if o_code and d_code and depart:
+                    seg_transport = es.get("transport_mode", "flight")
+                    loc_type = "city" if seg_transport in ("train", "bus") else "airport"
+                    seg = {
+                        "segment_id": es.get("segment_id") or f"seg_{i}",
+                        "origin": {"type": loc_type, "code": o_code},
+                        "destination": {"type": loc_type, "code": d_code},
+                        "depart_date": depart,
+                        "passengers": pax,
+                        "transport_mode": seg_transport,
+                        "depart_time_window": {"start": None, "end": None},
+                    }
+                    if seg_tids:
+                        seg["traveler_ids"] = seg_tids
+                    segs.append(seg)
+            # For converging: add return segments (one per group to their origin) if not already present
+            if converging and segs:
+                dest_code = (segs[0].get("destination") or {}).get("code") if segs else None
+                has_return = False
+                if dest_code:
+                    for s in segs:
+                        o = (s.get("origin") or {}).get("code") if isinstance(s.get("origin"), dict) else s.get("origin")
+                        if str(o or "").upper() == str(dest_code).upper():
+                            has_return = True
+                            break
+                if not has_return and dest_code:
+                    ret_date = clamp_date(dates.get("return_date")) or clamp_date(lod.get("check_out"))
+                    if not ret_date and (lod.get("stays") or extracted.get("stays")):
+                        sts = lod.get("stays") or extracted.get("stays") or []
+                        s0 = sts[0] if sts else {}
+                        ret_date = clamp_date(s0.get("check_out"))
+                    if not ret_date and lod.get("check_in") and lod.get("number_of_nights"):
+                        try:
+                            from datetime import datetime, timedelta
+                            ci = lod.get("check_in")
+                            nights = int(lod.get("number_of_nights", 0))
+                            if ci and nights:
+                                ret_date = (datetime.strptime(str(ci)[:10], "%Y-%m-%d") + timedelta(days=nights)).strftime("%Y-%m-%d")
+                        except Exception:
+                            pass
+                    if ret_date:
+                        for i, ct in enumerate(converging):
+                            orig = ct.get("origin") or ""
+                            orig_code = str(orig).upper() if len(str(orig)) == 3 else str(orig).upper()
+                            if len(orig_code) == 3:
+                                n_pax = int(ct.get("count", 0) or 0)
+                                if n_pax:
+                                    seg_tids = traveler_ids_by_group[i] if i < len(traveler_ids_by_group) else []
+                                    seg = {
+                                        "segment_id": f"seg_return_{i}",
+                                        "origin": {"type": "airport", "code": dest_code},
+                                        "destination": {"type": "airport", "code": orig_code},
+                                        "depart_date": ret_date,
+                                        "passengers": n_pax,
+                                        "transport_mode": "flight",
+                                        "depart_time_window": {"start": None, "end": None},
+                                    }
+                                    if seg_tids:
+                                        seg["traveler_ids"] = seg_tids
+                                    segs.append(seg)
+            # For single_destination/round_trip: add return segment to intent if not already present
+            if not converging and segs and trip_type in ("single_destination", "round_trip"):
+                dest_code = (segs[0].get("destination") or {}).get("code") if segs else None
+                orig_code = (segs[0].get("origin") or {}).get("code") if segs else None
+                if isinstance(orig_code, dict):
+                    orig_code = orig_code.get("code") if orig_code else None
+                if isinstance(dest_code, dict):
+                    dest_code = dest_code.get("code") if dest_code else None
+                has_return = any(
+                    str((s.get("origin") or {}).get("code") or (s.get("origin") if isinstance(s.get("origin"), str) else "") or "").upper() == str(dest_code or "").upper()
+                    for s in segs
+                )
+                if not has_return and dest_code and orig_code:
+                    ret_date = clamp_date(dates.get("return_date")) or clamp_date(lod.get("check_out"))
+                    if not ret_date and (lod.get("stays") or extracted.get("stays")):
+                        sts = lod.get("stays") or extracted.get("stays") or []
+                        s0 = sts[0] if sts else {}
+                        ret_date = clamp_date(s0.get("check_out"))
+                    if not ret_date and lod.get("check_in") and lod.get("number_of_nights"):
+                        try:
+                            from datetime import datetime, timedelta
+                            ci = lod.get("check_in")
+                            nights = int(lod.get("number_of_nights", 0))
+                            if ci and nights:
+                                ret_date = (datetime.strptime(str(ci)[:10], "%Y-%m-%d") + timedelta(days=nights)).strftime("%Y-%m-%d")
+                        except Exception:
+                            pass
+                    if ret_date:
+                        ret_seg = {
+                            "segment_id": "seg_return",
+                            "origin": {"type": "airport", "code": dest_code},
+                            "destination": {"type": "airport", "code": orig_code},
+                            "depart_date": ret_date,
+                            "passengers": default_passengers,
+                            "transport_mode": "flight",
+                            "depart_time_window": {"start": None, "end": None},
+                        }
+                        if traveler_ids_list:
+                            ret_seg["traveler_ids"] = traveler_ids_list
+                        segs.append(ret_seg)
+        elif origin and dest:
+            dep_date = clamp_date(dates.get("departure_date"))
+            if not trip_type:
+                trip_type = "round_trip"
+            if trip_type == "single_destination":
+                trip_type = "round_trip"
+            intent.setdefault("itinerary", {})["trip_type"] = trip_type
+            outbound_seg = {
+                "segment_id": "seg_outbound",
+                "origin": {"type": "airport", "code": origin},
+                "destination": {"type": "airport", "code": dest},
+                "depart_date": dep_date,
+                "passengers": default_passengers,
+                "transport_mode": "flight",
+                "depart_time_window": {"start": None, "end": None},
+            }
+            if traveler_ids_list:
+                outbound_seg["traveler_ids"] = traveler_ids_list
+            segs.append(outbound_seg)
+            if trip_type != "one_way":
+                ret_date = clamp_date(dates.get("return_date"))
+                if not ret_date and trip_type == "day_trip":
+                    ret_date = dep_date
+                if not ret_date and lod.get("stays"):
+                    s0 = lod["stays"][0] if lod["stays"] else {}
+                    ret_date = clamp_date(s0.get("check_out"))
+                if not ret_date:
+                    ret_date = clamp_date(lod.get("check_out"))
+                if not ret_date and lod.get("check_in") and lod.get("number_of_nights"):
+                    try:
+                        from datetime import datetime, timedelta
+                        ci = lod.get("check_in")
+                        nights = int(lod.get("number_of_nights", 0))
+                        if ci and nights:
+                            ci_dt = datetime.strptime(str(ci)[:10], "%Y-%m-%d")
+                            ret_date = (ci_dt + timedelta(days=nights)).strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                if ret_date:
+                    ret_pax = default_passengers
+                    if converging:
+                        ret_pax = sum(int(ct.get("count", 0) or 0) for ct in converging)
+                    ret_seg = {
+                        "segment_id": "seg_return",
+                        "origin": {"type": "airport", "code": dest},
+                        "destination": {"type": "airport", "code": origin},
+                        "depart_date": ret_date,
+                        "passengers": ret_pax,
+                        "transport_mode": "flight",
+                        "depart_time_window": {"start": None, "end": None},
+                    }
+                    if traveler_ids_list:
+                        ret_seg["traveler_ids"] = traveler_ids_list
+                    segs.append(ret_seg)
+
+        if segs:
+            intent.setdefault("itinerary", {})["segments"] = segs
+
+        dest_code = (segs[0].get("destination") or {}).get("code") if segs else dest
+        # For lodging_only (hotel-only requests): derive dest_code from stays when no segments exist
+        if not dest_code and not segs:
+            extracted_stays_for_dest = extracted.get("stays") or lod.get("stays") or []
+            if extracted_stays_for_dest:
+                first_stay_loc = extracted_stays_for_dest[0].get("location_code") or extracted_stays_for_dest[0].get("destination")
+                if first_stay_loc:
+                    dest_code = str(first_stay_loc).upper() if isinstance(first_stay_loc, str) else (first_stay_loc.get("code") if isinstance(first_stay_loc, dict) else None)
+            # Also try destination from extracted data (LLM may set destination even without segments)
+            if not dest_code:
+                ext_dest = extracted.get("destination")
+                if ext_dest:
+                    dest_code = str(ext_dest).upper() if isinstance(ext_dest, str) else (ext_dest.get("code") if isinstance(ext_dest, dict) else None)
+        ret_date = clamp_date(dates.get("return_date")) or (clamp_date(lod.get("check_out")) if lod else None)
+        if not ret_date and segs:
+            for s in segs:
+                o = (s.get("origin") or {}).get("code") if isinstance(s.get("origin"), dict) else s.get("origin")
+                if str(o).upper() == str(dest_code).upper():
+                    ret_date = clamp_date(s.get("depart_date"))
+                    break
+
+        if converging and dest_code:
+            stays = []
+            for i, ct in enumerate(converging):
+                arr = clamp_date(ct.get("arrival_date"))
+                co = ret_date or clamp_date(lod.get("check_out"))
+                if not co and lod.get("check_in") and lod.get("number_of_nights"):
+                    try:
+                        from datetime import datetime, timedelta
+                        ci = lod.get("check_in")
+                        nights = int(lod.get("number_of_nights", 0))
+                        if ci and nights:
+                            co = (datetime.strptime(str(ci)[:10], "%Y-%m-%d") + timedelta(days=nights)).strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                n_guests = int(ct.get("count", 0) or 0)
+                if arr and co and n_guests:
+                    stay_tids = traveler_ids_by_group[i] if i < len(traveler_ids_by_group) else []
+                    stay = {
+                        "location_code": dest_code,
+                        "check_in": arr,
+                        "check_out": co,
+                        "number_of_guests": n_guests,
+                    }
+                    if stay_tids:
+                        stay["traveler_ids"] = stay_tids
+                    stays.append(stay)
+            if stays:
+                intent.setdefault("itinerary", {}).setdefault("lodging", {})["stays"] = stays
+        else:
+            extracted_stays = extracted.get("stays") or lod.get("stays") or []
+            if extracted_stays:
+                stays = []
+                for s in extracted_stays:
+                    ci = clamp_date(s.get("check_in"))
+                    co = clamp_date(s.get("check_out"))
+                    loc = s.get("location_code") or s.get("destination")
+                    n_guests = s.get("number_of_guests")
+                    if n_guests is None:
+                        n_guests = default_passengers
+                    else:
+                        n_guests = int(n_guests)
+                    if ci and co and loc:
+                        stay = {
+                            "location_code": loc,
+                            "check_in": ci,
+                            "check_out": co,
+                            "number_of_guests": n_guests,
+                            "location_hint": s.get("location_hint"),
+                        }
+                        raw_stay_tids = s.get("traveler_ids") if isinstance(s.get("traveler_ids"), list) else []
+                        valid_tids = set(traveler_ids_list)
+                        stay_tids = [t for t in raw_stay_tids if t in valid_tids] if raw_stay_tids else None
+                        if stay_tids:
+                            stay["traveler_ids"] = stay_tids
+                        elif traveler_ids_list:
+                            stay["traveler_ids"] = traveler_ids_list
+                        stays.append(stay)
+                if stays:
+                    intent.setdefault("itinerary", {}).setdefault("lodging", {})["stays"] = stays
+            elif lod.get("check_in") or lod.get("check_out"):
+                ci = clamp_date(lod.get("check_in"))
+                co = clamp_date(lod.get("check_out"))
+                if ci and co and dest_code:
+                    n_guests = default_passengers
+                    stay = {"location_code": dest_code, "check_in": ci, "check_out": co, "number_of_guests": n_guests}
+                    if traveler_ids_list:
+                        stay["traveler_ids"] = traveler_ids_list
+                    intent.setdefault("itinerary", {}).setdefault("lodging", {})["stays"] = [stay]
+
+        if "needed" in lod:
+            intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = lod["needed"]
+        if lod.get("number_of_nights") is not None:
+            intent.setdefault("itinerary", {}).setdefault("lodging", {})["number_of_nights"] = lod["number_of_nights"]
+
+        activities = extracted.get("activities") or []
+        if activities:
+            intent.setdefault("extras", {})["activities"] = activities
+
+        itinerary_legs = extracted.get("itinerary") or []
+        if itinerary_legs and not segs:
+            for i, leg in enumerate(itinerary_legs):
+                o = leg.get("from") or leg.get("origin")
+                d = leg.get("to") or leg.get("destination")
+                dt = clamp_date(leg.get("date") or leg.get("depart_date"))
+                if o and d and dt:
+                    o_code = str(o).upper() if len(str(o)) == 3 else str(o)
+                    d_code = str(d).upper() if len(str(d)) == 3 else str(d)
+                    seg = {
+                        "segment_id": f"seg_{i}",
+                        "origin": {"type": "airport", "code": o_code},
+                        "destination": {"type": "airport", "code": d_code},
+                        "depart_date": dt,
+                        "passengers": default_passengers,
+                        "transport_mode": "flight",
+                        "depart_time_window": {"start": None, "end": None},
+                    }
+                    if traveler_ids_list:
+                        seg["traveler_ids"] = traveler_ids_list
+                    segs.append(seg)
+            if segs:
+                intent.setdefault("itinerary", {})["segments"] = segs
+                if not trip_type:
+                    intent.setdefault("itinerary", {})["trip_type"] = "multi_city"
+
+        converging = extracted.get("converging_travelers") or []
+        if converging:
+            intent.setdefault("extras", {})["travelers"] = converging
+            intent.setdefault("itinerary", {})["converging"] = True
+            if not trip_type:
+                intent.setdefault("itinerary", {})["trip_type"] = "converging"
+
+        if trip_type == "day_trip":
+            intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = False
+
+        if trip_type == "lodging_only":
+            intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = True
+            intent.setdefault("itinerary", {})["segments"] = []
+
+        if extracted.get("extras"):
+            for k, v in extracted["extras"].items():
+                if v is not None:
+                    intent.setdefault("extras", {})[k] = v
+
+        intent["updated_at"] = int(time.time())
+        return intent
+
+    # 2) Retrieval via VectorDB - used to inform intent extraction (examples inform intent, not plan)
+    def retrieve(self, query: Union[str, Dict[str, Any]], k_cases: int = 4, k_facts: int = 4, k_skills: int = 6):
+        """Retrieve cases, facts, skills. query can be user message (str) or intent (dict)."""
+        print('Retrieving cases, facts and skills from agent experience...')
+        if isinstance(query, dict):
+            query_str = json.dumps(intent_for_retrieval(query), sort_keys=True, separators=(",", ":"))
+            dest = intent_destination(query)
+            filt = {k: v for k, v in {"destination": dest}.items() if v}
+        else:
+            query_str = str(query).strip()
+            filt = None
+        cases = self.vdb.search(query=query_str, kind="case", k=k_cases, filters=filt)
+        facts = self.vdb.search(query=query_str, kind="fact", k=k_facts, filters=filt)
+        skills = self.vdb.search(query=query_str, kind="skill", k=k_skills, filters=filt)
+
+        '''
         # LLM skill scoring
         prompt_scores = f"""
             You are a skill ranker.
             TASK: SKILL_SCORING
-            Given a Signature and a list of candidate skills, score each skill's applicability in [0,1].
+            Given an intent and a list of candidate skills, score each skill's applicability in [0,1].
             Return JSON: {{"scores": [{{"skill_id": str, "score": float}}]}}
 
-            Signature:
+            Intent/Request:
             ```json
-            {sig.to_text()}
+            {query_str}
             ```
 
             Skills:
@@ -648,526 +1333,17 @@ class Planner:
         scored = self.llm.complete_json(prompt_scores).get("scores", [])
         #if not scored:
         #    return False
-        
+
         score_map = {s["skill_id"]: s["score"] for s in scored}
         skills_ranked = sorted(skills, key=lambda s: score_map.get(s.id, 0), reverse=True)
         #print('Cases:',cases)
         #print('Facts:',facts)
         #print('Skills:',skills_ranked)
-        
         return {'cases':cases, 'facts':facts, 'skills':skills_ranked}
 
-    # 3) Adapt plan via LLM using multiple example cases, then validate
-    def adapt_from_cases(self, cases: List[Case], sig: Signature, facts: List[VDBItem]) -> Plan:
-        print(f'Adapting plan from {len(cases)} example cases...')
-        
-        # Convert cases to example format
-        example_cases = []
-        for case in cases[:3]:  # Use up to 3 example cases
-            example_cases.append({
-                "signature": case.signature_text,
-                "plan_steps": [asdict(s) for s in case.plan.steps]
-            })
-        
-        #print('Example cases:', json.dumps(example_cases, indent=2))
-        fact_texts = [{"text": f.text, "meta": f.meta} for f in facts]
-        
-        # Build action catalog summary for reference
-        catalog_summary = [{"name": t.key, "required_args": t.required_args} for t in self.action_catalog]
-        
-        # Use prompt from database if available, otherwise use default
-        prompt_template = self.prompts.get('adapt_plan', '')
-        if prompt_template:
-            # Compute values for tokens
-            sig_text = sig.to_text()
-            example_cases_json = json.dumps(example_cases, indent=2)
-            fact_texts_json = json.dumps(fact_texts, indent=2)
-            catalog_summary_json = json.dumps(catalog_summary, indent=2)
-            plan_id = uuid.uuid4().hex[:8]
-            
-            # Replace tokens with computed values
-            replacements = {
-                'sig_text': sig_text,
-                'example_cases': example_cases_json,
-                'fact_texts': fact_texts_json,
-                'catalog_summary': catalog_summary_json,
-                'plan_id': plan_id
-            }
-            prompt = self._replace_tokens(prompt_template, replacements)
-        else:
-            # Fallback to default hardcoded prompt
-            prompt = f"""
-            You are a planning agent using case-based reasoning.
-            TASK: ADAPT_PLAN
-            
-            INSTRUCTIONS:
-            1. Study the EXAMPLE CASES below to understand planning patterns and structure
-            2. Analyze the NEW REQUEST (signature) to identify all facts and requirements
-            3. Generate a COMPLETE NEW plan by adapting the example patterns to match the new request's facts
-            
-            ADAPTATION PROCESS:
-            - Extract the structure and sequence from example cases
-            - Replace example values with facts from the new signature
-            - Ensure all requirements from the signature are addressed
-            - Maintain logical flow and dependencies from examples
-            - Adapt step sequences to match the new request's specifics
-            
-            INCORPORATING SIGNATURE FACTS:
-            - Use all information from the signature (domain, goal, destination, party, dates, etc.)
-            - Check signature.activities array for requested actions/services
-            - For each activity, create appropriate plan steps using available actions
-            - Use dates from signature.dates or signature.extras for timing
-            - Use party information for quantities and participant details
-            - Apply constraints and preferences from the signature
-            - Place activities in chronological order based on dates
-            
-            NEW REQUEST (use these details for all inputs):
-            ```json
-            {sig.to_text()}
-            ```
-            
-            EXAMPLE CASES (learn patterns and structure, NOT specific values):
-            ```json
-            {json.dumps(example_cases, indent=2)}
-            ```
-            
-            RELEVANT FACTS:
-            ```json
-            {json.dumps(fact_texts, indent=2)}
-            ```
-            
-            ACTION CATALOG (ensure inputs match required_args):
-            ```json
-            {json.dumps(catalog_summary, indent=2)}
-            ```
-            
-            OUTPUT FORMAT:
-            Return ONLY JSON with this exact structure:
-            {{
-                "plan": {{
-                    "id": "{uuid.uuid4().hex[:8]}",
-                    "meta": {{"strategy": "adapted"}},
-                    "steps": [
-                        {{
-                            "step_id": 0,
-                            "title": "descriptive title",
-                            "action": "actionName",
-                            "inputs": {{"arg1": "value1", ...}},
-                            "enter_guard": "True",
-                            "success_criteria": "appropriate criteria",
-                            "depends_on": [],
-                            "next_step": 1
-                        }},
-                        {{
-                            "step_id": 1,
-                            "title": "next step title",
-                            "action": "actionName",
-                            "inputs": {{"arg1": "value1", ...}},
-                            "enter_guard": "True",
-                            "success_criteria": "appropriate criteria",
-                            "depends_on": [0],
-                            "next_step": null
-                        }}
-                    ]
-                }}
-            }}
-            
-            STEP STRUCTURE REQUIREMENTS:
-            - step_id: Sequential integer starting from 0 (0, 1, 2, 3, ...)
-            - depends_on: Array of step_id integers that this step depends on
-            - next_step: The step_id of the next step in execution order, or null for the last step
-            - title: Clear, descriptive title for the step
-            - action: Must match an action name from the ACTION CATALOG
-            - inputs: Object with all required_args from the action spec, plus any optional_args
-            - enter_guard: Boolean expression (typically "True")
-            - success_criteria: Expression to evaluate step success
-            
-            CHRONOLOGICAL ORDER (CRITICAL):
-            - Steps MUST be listed in the order they occur in time
-            - step_id values MUST be sequential: 0, 1, 2, 3...
-            - next_step links to the following step (step 0 → 1 → 2 → 3 → null)
-            - Ensure dependencies are satisfied (depends_on steps execute before dependent steps)
-            
-            FINAL VALIDATION BEFORE RETURNING:
-            - Does the plan address ALL requirements from the signature?
-            - Are all signature.activities represented in plan steps?
-            - Are dates and timing constraints respected?
-            - Is the plan logically complete and executable?
-        """
-        data = self.llm.complete_json(prompt)
-        if not data or "plan" not in data:
-            print('[ERROR] LLM returned invalid plan structure')
-            return Plan(id=uuid.uuid4().hex[:8], steps=[], meta={"strategy": "adapted", "error": "LLM returned invalid plan"})
-        
-        # Create steps
-        steps = []
-        for idx, s in enumerate(data["plan"]["steps"]):
-            if "action" not in s or not s.get("action"):
-                print(f'[WARNING] Step {idx} missing or empty action field! Step data: {s}')
-            # Ensure all required fields are present
-            if "step_id" not in s:
-                s["step_id"] = len(steps)  # Fallback to sequential
-            if "depends_on" not in s:
-                s["depends_on"] = []
-            if "next_step" not in s:
-                s["next_step"] = None
-            try:
-                steps.append(PlanStep(**s))
-            except Exception as e:
-                print(f'[ERROR] Failed to create PlanStep from step {idx}: {e}')
-                print(f'[ERROR] Step data: {json.dumps(s, indent=2, cls=DecimalEncoder)}')
-                continue
-        plan = Plan(id=data["plan"]["id"], steps=steps, meta=data["plan"].get("meta", {}))
-        print('Raw adapted plan:')
-        print(json.dumps({"id": plan.id, "meta": plan.meta, "steps": [asdict(s) for s in plan.steps]}, indent=2, cls=DecimalEncoder))
-        validated_plan = self._validate_and_patch_plan(plan)
-        #print('Validated adapted plan:')
-        #print(json.dumps({"id": validated_plan.id, "meta": validated_plan.meta, "steps": [asdict(s) for s in validated_plan.steps]}, indent=2, cls=DecimalEncoder))
-        return validated_plan
+        '''
 
-    # 4) Compose plan via LLM with explicit Action Catalog, then validate
-    def compose_from_skills(self, sig: Signature, skills: List[VDBItem]) -> Plan:
-        print('Composing a new plan from scratch based on the user request...')
-        catalog = [{
-            "name": t.key,
-            "description": t.description,
-            "required_args": t.required_args,
-            "optional_args": t.optional_args,
-            "success_criteria_hint": t.success_criteria_hint
-        } for t in self.action_catalog]
-
-        # Use prompt from database if available, otherwise use default
-        prompt_template = self.prompts.get('compose_plan', '')
-        if prompt_template:
-            # Compute values for tokens
-            sig_text = sig.to_text()
-            catalog_json = json.dumps(catalog, indent=2)
-            skills_json = json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2)
-            plan_id = uuid.uuid4().hex[:8]
-            
-            # Replace tokens with computed values
-            replacements = {
-                'sig_text': sig_text,
-                'catalog': catalog_json,
-                'skills': skills_json,
-                'plan_id': plan_id
-            }
-            prompt = self._replace_tokens(prompt_template, replacements)
-        else:
-            # Fallback to default hardcoded prompt
-            prompt = f"""
-            You are a planner that composes a COMPLETE executable plan using ONLY the allowed actions.
-            TASK: COMPOSE_PLAN
-            
-            INSTRUCTIONS:
-            - Analyze the signature to understand all requirements and facts
-            - Use the ACTION CATALOG to determine available actions and their required inputs
-            - Reference the SKILLS for semantic hints and best practices
-            - Create a complete plan that addresses all signature requirements
-            
-            PLAN COMPOSITION:
-            - Start with initial steps that establish prerequisites
-            - Add steps for each activity or requirement from the signature
-            - Ensure all signature.activities are represented as plan steps
-            - Respect dates, timing, and sequencing from the signature
-            - Apply constraints and preferences from the signature
-            - Create a logical flow where steps build upon each other
-            
-            USING THE ACTION CATALOG:
-            - Each action has required_args that MUST be provided in step.inputs
-            - Optional_args can be included if relevant
-            - Use action.success_criteria_hint as a guide for step.success_criteria
-            - Ensure all action inputs are populated with values from the signature
-            
-            INCORPORATING SIGNATURE INFORMATION:
-            - Use signature.domain to understand the context
-            - Use signature.goal to guide the overall plan structure
-            - Use signature.destination, party, dates for step inputs
-            - Use signature.activities to create corresponding plan steps
-            - Use signature.constraints and preferences to refine steps
-            - Use signature.extras for domain-specific requirements
-            
-            Signature:
-            ```json
-            {sig.to_text()}
-            ```
-            
-            ACTION_CATALOG:
-            ```json
-            {json.dumps(catalog, indent=2)}
-            ```
-            
-            Top Skills (semantic hints):
-            ```json
-            {json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2)}
-            ```
-            
-            Return ONLY JSON:
-            {{"plan": {{"id":"{uuid.uuid4().hex[:8]}", "meta": {{"strategy":"compose"}}, "steps": [PlanStep..]}}}}
-            
-            Each PlanStep:
-            {{
-            "step_id": 0,
-            "title": "descriptive title",
-            "action": "<actionName from ACTION_CATALOG>",
-            "inputs": {{"required_arg": "value", ...}},
-            "enter_guard": "True",
-            "success_criteria": "from action hint",
-            "depends_on": [],
-            "next_step": 1
-            }}
-            
-            STEP STRUCTURE REQUIREMENTS:
-            - step_id: Sequential integer starting from 0 (0, 1, 2, 3, ...)
-            - depends_on: Array of step_id integers that this step depends on
-            - next_step: The step_id of the next step in execution order, or null for the last step
-            - title: Clear, descriptive title for what this step accomplishes
-            - action: Must match an action name from the ACTION_CATALOG
-            - inputs: Object containing all required_args from the action spec, plus any optional_args
-            - enter_guard: Boolean expression (typically "True")
-            - success_criteria: Expression to evaluate whether the step succeeded
-            
-            CHRONOLOGICAL ORDER (CRITICAL):
-            - Steps MUST be listed in the order they occur in time
-            - step_id values MUST be sequential: 0, 1, 2, 3...
-            - next_step links to the following step (step 0 → 1 → 2 → 3 → null)
-            - Ensure dependencies are satisfied (depends_on steps execute before dependent steps)
-            
-            FINAL VALIDATION BEFORE RETURNING:
-            - Does the plan address ALL requirements from the signature?
-            - Are all signature.activities represented in plan steps?
-            - Are all action required_args provided in step inputs?
-            - Is the plan logically complete and executable?
-            - Do step dependencies form a valid execution order?
-        """
-        data = self.llm.complete_json(prompt)
-        if not data or "plan" not in data:
-            print('[ERROR] LLM returned invalid plan structure')
-            return Plan(id=uuid.uuid4().hex[:8], steps=[], meta={"strategy": "compose", "error": "LLM returned invalid plan"})
-        
-        # Create steps
-        steps = []
-        for idx, s in enumerate(data["plan"]["steps"]):
-            if "action" not in s or not s.get("action"):
-                print(f'[WARNING] Step {idx} missing or empty action field! Step data: {s}')
-            # Ensure all required fields are present
-            if "step_id" not in s:
-                s["step_id"] = len(steps)  # Fallback to sequential
-            if "depends_on" not in s:
-                s["depends_on"] = []
-            if "next_step" not in s:
-                s["next_step"] = None
-            try:
-                steps.append(PlanStep(**s))
-            except Exception as e:
-                print(f'[ERROR] Failed to create PlanStep from step {idx}: {e}')
-                print(f'[ERROR] Step data: {json.dumps(s, indent=2, cls=DecimalEncoder)}')
-                continue
-        plan = Plan(id=data["plan"]["id"], steps=steps, meta=data["plan"].get("meta", {}))
-        print('Raw composed plan:')
-        print(json.dumps({"id": plan.id, "meta": plan.meta, "steps": [asdict(s) for s in plan.steps]}, indent=2, cls=DecimalEncoder))
-        validated_plan = self._validate_and_patch_plan(plan)
-        #print('Validated composed plan:')
-        #print(json.dumps({"id": validated_plan.id, "meta": validated_plan.meta, "steps": [asdict(s) for s in validated_plan.steps]}, indent=2, cls=DecimalEncoder))
-        return validated_plan
-
-    # 5) Select best plan via LLM
-    def select_plan(self, sig: Signature, candidates: List[Plan]) -> Plan:
-        print('Selecting best plan from list of candidates...')
-        
-        # Create detailed plan summaries including step titles and actions
-        plan_details = []
-        for i, p in enumerate(candidates):
-            step_summaries = []
-            for step in p.steps:
-                step_summaries.append({
-                    "title": step.title,
-                    "action": step.action,
-                    "step_id": step.step_id
-                })
-            plan_details.append({
-                "index": i,
-                "id": p.id,
-                "strategy": p.meta.get("strategy"),
-                "total_steps": len(p.steps),
-                "steps": step_summaries
-            })
-        
-        # Extract activities from signature for comparison
-        activities_requested = []
-        if sig.activities:
-            for act in sig.activities:
-                activities_requested.append({
-                    "type": act.get("type"),
-                    "description": act.get("description"),
-                    "location": act.get("location")
-                })
-        
-        # Use prompt from database if available, otherwise use default
-        prompt_template = self.prompts.get('select_best_plan', '')
-        if prompt_template:
-            # Compute values for tokens
-            sig_text = sig.to_text()
-            activities_json = json.dumps(activities_requested, indent=2)
-            plan_details_json = json.dumps(plan_details, indent=2)
-            
-            # Replace tokens with computed values
-            replacements = {
-                'sig_text': sig_text,
-                'activities_requested': activities_json,
-                'plan_details': plan_details_json
-            }
-            prompt = self._replace_tokens(prompt_template, replacements)
-        else:
-            # Fallback to default hardcoded prompt
-            prompt = f"""
-            You are a meta-planner evaluating candidate plans for completeness and quality.
-            TASK: SELECT_BEST_PLAN
-            
-            Given a Signature with requirements and multiple candidate plans, choose the best one.
-            
-            EVALUATION CRITERIA (in order of importance):
-            1. REQUIREMENT COVERAGE: Does the plan address ALL requirements from the signature?
-               - Check signature.activities array - each activity should have corresponding plan steps
-               - Check signature.constraints - all constraints should be respected
-               - Check signature.preferences - preferences should be considered
-               - Missing requirements = incomplete plan
-            
-            2. COMPLETENESS: Is the plan logically complete?
-               - All necessary steps are present
-               - The plan achieves the stated goal
-               - No critical gaps in the execution sequence
-            
-            3. LOGICAL SEQUENCE: Are steps in correct chronological and dependency order?
-               - Steps follow a logical progression
-               - Dependencies are properly established
-               - Timing constraints are respected
-            
-            4. EFFICIENCY: Reasonable number of steps (not too sparse, not redundant)
-               - Plan is neither overly complex nor overly simplistic
-               - Steps are appropriately granular
-            
-            5. ACTION VALIDITY: Are all steps using valid actions with correct inputs?
-               - Actions exist in the action catalog
-               - Required arguments are provided
-               - Input values are appropriate
-            
-            Return ONLY JSON: {{"choice_index": int, "reason": str}}
-            
-            The reason should explicitly state:
-            - Which requirements are covered/missing in the chosen plan
-            - Why this plan is better than the alternatives
-            - Any notable strengths or weaknesses
-
-            Signature (with requirements):
-            ```json
-            {sig.to_text()}
-            ```
-            
-            Activities Requested:
-            ```json
-            {json.dumps(activities_requested, indent=2)}
-            ```
-            
-            Candidate Plans (with step details):
-            ```json
-            {json.dumps(plan_details, indent=2)}
-            ```
-            
-            IMPORTANT: 
-            - Prefer plans that cover ALL requirements over those that skip some
-            - Consider both completeness and quality
-            - Choose the plan most likely to successfully achieve the goal
-        """
-        out = self.llm.complete(prompt)
-        print('Candidate selection results:',out)
-        try:
-            data = json.loads(out)
-            idx = max(0, min(len(candidates)-1, int(data.get("choice_index", 0))))
-        except Exception:
-            idx = 0
-        return candidates[idx]
-
-    # Validator: ensure known actions + required args are present
-    def _validate_and_patch_plan(self, plan: Plan) -> Plan:
-        print(f'Validating plan with {len(plan.steps)} steps...')
-        known = {t.key: t for t in self.action_catalog}
-        validated: List[PlanStep] = []
-        for s in plan.steps:
-            print(f'  Validating step {s.step_id}: action={repr(s.action)}, action_type={type(s.action)}, inputs={s.inputs}')
-            
-            # Check if action is empty or None
-            if not s.action or s.action == "":
-                print(f'    REJECTED: empty or missing action field (value: {repr(s.action)})')
-                continue
-            
-            # Check if action is in catalog
-            if s.action not in known:
-                print(f'    REJECTED: unknown action "{s.action}"')
-                continue
-            
-            spec = known[s.action]
-            inputs = s.inputs or {}
-            
-            missing = [a for a in spec.required_args if a not in inputs]
-            if missing:
-                print(f'    REJECTED: missing required args {missing}')
-                provided_keys = list(inputs.keys()) if inputs else []
-                continue
-            
-            # Populate optional fields if not present
-            if not s.success_criteria and spec.success_criteria_hint:
-                s.success_criteria = spec.success_criteria_hint
-            if not s.enter_guard:
-                s.enter_guard = "True"
-            print(f'    ACCEPTED')
-            validated.append(s)
-        print(f'Validation complete: {len(validated)}/{len(plan.steps)} steps kept')
-        plan.steps = validated
-        return plan
-
-
-
-    # Orchestrator
-    def propose(self, req: Dict[str, Any]) -> Dict[str, Any]:
-        function = 'propose'
-        print('Initiating planning process...')
-        print(req)
-        sig = self.to_signature(req)
-        if not sig:
-            return {'success':False,'input':req,'output':'Signature could not be generated'}
-        
-        retrieved= self.retrieve(sig)
-        
-        if not retrieved:
-            return{'success':False,'function':function, 'input':req, 'output':'Could not retrieve'}
-        
-        cases = retrieved['cases']
-        facts = retrieved['facts']
-        skills = retrieved['skills']
-
-        candidate_plans: List[Plan] = []
-        if cases:
-            # Generate plan from example use cases
-            case_objects = [self._vdb_case_to_case(c) for c in cases[:3]]
-            adapted = self.adapt_from_cases(case_objects, sig, facts)
-            candidate_plans.append(adapted)
-        #Generate plan from actions and skills
-        composed = self.compose_from_skills(sig, skills[:4])
-        candidate_plans.append(composed)
-
-        final = self.select_plan(sig, candidate_plans)
-
-
-        return {
-            "function":"propose",
-            "success": True,
-            "input": req,
-            "output": {
-                "signature":asdict(sig),
-                "plan":asdict(final)    
-            }    
-        }
+        return {'cases':cases, 'facts':facts, 'skills':skills}
 
     # Helper: convert VDB 'case' item to Case object
     def _vdb_case_to_case(self, item: VDBItem) -> Case:
@@ -1175,9 +1351,10 @@ class Planner:
             obj = json.loads(item.text)
             steps = [PlanStep(**s) for s in obj["plan"]["steps"]]
             p = Plan(id=f"plan.from_case.{item.id}", steps=steps, meta={"strategy":"retrieved"})
-            return Case(id=item.id, signature_text=obj.get("signature",""), plan=p, outcomes={"rating":4.2}, context=item.meta)
+            intent_txt = obj.get("intent", obj.get("trip_intent", ""))
+            return Case(id=item.id, intent_text=intent_txt, plan=p, outcomes={"rating":4.2}, context=item.meta)
         except Exception:
-            return Case(id=item.id, signature_text="", plan=Plan(id=f"plan.empty.{item.id}", steps=[], meta={}), outcomes={}, context=item.meta)
+            return Case(id=item.id, intent_text="", plan=Plan(id=f"plan.empty.{item.id}", steps=[], meta={}), outcomes={}, context=item.meta)
 
 
 
@@ -1189,22 +1366,20 @@ class Planner:
 # Create a context variable to store the request context
 request_context: ContextVar[RequestContext] = ContextVar('request_context', default=RequestContext())
 
-'''
-This class searches for Hotels using the Serp API
-'''
+
 
 class GeneratePlan:
     def __init__(self, prompts: Optional[Dict[str, str]] = None):
         # Load config for handlers (independent of Flask)
         self.config = load_config()
-        
+
         self.AGU = None
         self.DAC = DataController(config=self.config)
         self.BPC = BlueprintController(config=self.config)
-        
+
         # Store prompts passed during initialization (from text files or database)
         self.prompts = prompts or {}
-        
+
 
     def _get_context(self) -> RequestContext:
         """Get the current request context."""
@@ -1220,115 +1395,22 @@ class GeneratePlan:
         for key, value in kwargs.items():
             setattr(context, key, value)
         self._set_context(context)
-    
-    def _load_prompts_from_local_file(self) -> Dict[str, str]:
-        """
-        Load prompts from the repository copy only (no DB).
-        Accepts YAML/JSON content stored at pes_prompts.json.
-        """
-        # From handlers/ -> .../extensions
-        extensions_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-        path = os.path.join(extensions_root, "noma/package/noma/prompts/pes_prompts.json")
-        
-        try:
-            if not os.path.isfile(path):
-                print(f"Warning: prompt file not found: {path}")
-                return {}
-            
-            with open(path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-            
-            if not data:
-                return {}
-            
-            # Files use a top-level "prompts" key; fall back to root dict if absent
-            prompt_section = data.get("prompts") if isinstance(data, dict) else None
-            if prompt_section and isinstance(prompt_section, dict):
-                prompts = {k: v for k, v in prompt_section.items() if isinstance(v, str)}
-                if prompts:
-                    print(f"Loaded prompts from local file: {path}")
-                    return prompts
-        except Exception as e:
-            print(f"Warning: Could not load prompts from file {path}: {str(e)}")
-        
-        return {}
-    
-    def _load_seed_cases_from_local_file(self) -> List[Dict[str, Any]]:
-        """
-        Load seed cases from the repository copy only (no DB).
-        Accepts JSON content stored at pes/seed_cases.json.
-        """
-        extensions_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-        path = os.path.join(extensions_root, "pes/package/pes/seed_cases.json")
-        
-        try:
-            if not os.path.isfile(path):
-                print(f"Warning: seed case file not found: {path}")
-                return []
-            
-            with open(path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-            
-            if not data or not isinstance(data, list):
-                return []
-            
-            cases: List[Dict[str, Any]] = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                
-                text_blob = item.get("text")
-                meta = item.get("meta", {})
-                
-                parsed_case: Optional[Dict[str, Any]] = None
-                if isinstance(text_blob, str):
-                    try:
-                        parsed_case = json.loads(text_blob)
-                    except Exception:
-                        parsed_case = None
-                elif isinstance(text_blob, dict):
-                    parsed_case = text_blob
-                
-                if not parsed_case:
-                    continue
-                
-                signature_text = parsed_case.get("signature")
-                if isinstance(signature_text, dict):
-                    signature_text = json.dumps(signature_text)
-                
-                plan_data = parsed_case.get("plan", {})
-                if signature_text and plan_data:
-                    cases.append({
-                        "signature": signature_text,
-                        "plan": plan_data,
-                        "meta": meta if isinstance(meta, dict) else {}
-                    })
-            
-            if cases:
-                print(f"Loaded seed cases from local file: {path}")
-            return cases
-        except Exception as e:
-            print(f"Warning: Could not load seed cases from file {path}: {str(e)}")
-        
-        return []
-    
+
     def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
         """
         Load prompts from database.
-        Returns a dictionary with keys: 'to_signature', 'adapt_plan', 'compose_plan', 'select_best_plan'
+        Returns a dictionary with keys: 'to_intent', 'compose_plan'
         """
         prompts = {
-            'to_signature': '',
-            'adapt_plan': '',
-            'compose_plan': '',
-            'select_best_plan': ''
+            'to_intent': '',
+            'compose_plan': ''
         }
-        
+
         try:
             # Get all prompt records for the case_group
             if not case_group:
                 raise Exception('No case group')
-            
+
             query = {
                 'portfolio': portfolio,
                 'org': org,
@@ -1340,61 +1422,109 @@ class GeneratePlan:
                 'sort': 'asc'
             }
             response = self.DAC.get_a_b_query(query)
-            
+
             #response = self.DAC.get_a_b(portfolio, org, prompt_ring, limit=1000)
             if response and 'items' in response:
                 for item in response['items']:
                     # Get the key field (exact match from database)
                     key = item.get('key', '').lower()
-                    
+
                     # Get prompt text from 'prompt' field only
                     prompt_text = item.get('prompt', '')
-                    
+
                     # Strip leading whitespace (database responses have leading spaces)
                     if prompt_text:
                         prompt_text = prompt_text.lstrip()
-                    
+
                     # Map keys to prompt types using exact match only
-                    if key == 'to_signature':
-                        prompts['to_signature'] = prompt_text
-                    elif key == 'adapt_plan':
-                        prompts['adapt_plan'] = prompt_text
+                    if key == 'to_intent':
+                        prompts['to_intent'] = prompt_text
                     elif key == 'compose_plan':
                         prompts['compose_plan'] = prompt_text
-                    elif key == 'select_best_plan':
-                        prompts['select_best_plan'] = prompt_text
         except Exception as e:
             print(f'Warning: Could not load prompts from database: {str(e)}')
-            
-        
+
+
         return prompts
-    
+
+    def _load_prompts_from_package(self, package_route: str) -> Dict[str, str]:
+        """
+        Load prompts from a Python package using importlib.resources.
+        Works regardless of filesystem location (installed package, zip, etc.).
+
+        Args:
+            package_route: Dotted path to the package subdirectory containing prompt YAML files.
+                          Example: 'noma.prompts.pes' loads from noma/prompts/pes/*.yaml
+
+        Returns:
+            Dictionary with keys: 'to_intent', 'compose_plan'
+        """
+        print('Using prompts from package')
+
+        prompts = {
+            'to_intent': '',
+            'compose_plan': ''
+        }
+        if not yaml:
+            print('Warning: PyYAML not installed. Cannot load prompts from package.')
+            return prompts
+        try:
+            parts = package_route.split('.')
+            if not parts:
+                raise ValueError('package_route must be non-empty (e.g. noma.prompts.pes)')
+            package_name = parts[0]
+            path_parts = parts[1:] if len(parts) > 1 else []
+            resource_root = importlib.resources.files(package_name)
+            for p in path_parts:
+                resource_root = resource_root / p
+            if not resource_root.is_dir():
+                raise FileNotFoundError(f'Package resource path does not exist: {package_route}')
+            for entry in resource_root.iterdir():
+                if entry.name.endswith('.yaml') or entry.name.endswith('.yml'):
+                    try:
+                        with importlib.resources.as_file(entry) as f:
+                            with open(f, 'r') as fp:
+                                raw = yaml.safe_load(fp)
+                        if not isinstance(raw, dict):
+                            continue
+                        key = (raw.get('key') or '').lower()
+                        prompt_text = raw.get('prompt', '') or ''
+                        if prompt_text:
+                            prompt_text = prompt_text.lstrip()
+                        if key in prompts:
+                            prompts[key] = prompt_text
+                    except Exception as e:
+                        print(f'Warning: Could not load prompt from {entry.name}: {e}')
+        except Exception as e:
+            print(f'Warning: Could not load prompts from package {package_route}: {e}')
+        return prompts
+
     def _load_actions(self, portfolio: str, org: str, action_ring: str = "schd_actions") -> List[ActionSpec]:
         """
         Load action catalog from database (schd_actions ring).
         Returns a list of ActionSpec objects.
         """
         actions = []
-        
+
         try:
             # Get all action records from the ring
             response = self.DAC.get_a_b(portfolio, org, action_ring, limit=1000)
             if response and 'items' in response:
-                
+
                 #Filter out
-                
+
                 for item in response['items']:
                     name = item.get('name', '')
                     key = item.get('key', '')
                     goal = item.get('goal', '')
                     tools_ref = item.get('tools_reference', '')
                     slots = item.get('slots', '')
-                    
+
                     # Parse slots field for argument definitions
                     # Format expected: JSON string with 'required' and 'optional' arrays
                     required_args = []
                     optional_args = []
-                    
+
                     if slots:
                         try:
                             # Try parsing as JSON first
@@ -1403,7 +1533,7 @@ class GeneratePlan:
                                 slots_data = json.loads(slots)
                             else:
                                 slots_data = slots
-                            
+
                             if isinstance(slots_data, dict):
                                 required_args = slots_data.get('required', [])
                                 optional_args = slots_data.get('optional', [])
@@ -1418,13 +1548,13 @@ class GeneratePlan:
                                 required_args = parts
                         except Exception as e:
                             print(f'Warning: Could not parse slots for action {name or key}: {str(e)}')
-                    
+
                     # Use goal as description, or fallback to name
                     description = goal or f"Action: {name or key}"
-                    
+
                     # Get success criteria from verification field if available
                     success_criteria_hint = item.get('verification', '')
-                    
+
                     if key:
                         action_key = key
                         actions.append(ActionSpec(
@@ -1436,22 +1566,22 @@ class GeneratePlan:
                         ))
         except Exception as e:
             print(f'Warning: Could not load actions from database: {str(e)}')
-            
-        
+
+
         return actions
-    
+
     def _load_seed_cases(self, portfolio: str, org: str, case_ring: str = "pes_seed_cases", case_group: str = None) -> List[Dict[str, Any]]:
         """
         Load seed cases from database (trips/cases ring).
-        Returns a list of case dictionaries with 'signature' and 'plan' keys.
+        Returns a list of case dictionaries with 'intent' and 'plan' keys.
         """
         cases = []
-        
+
         try:
             # Get all case records from the ring
             if not case_group:
                 raise Exception('No case group')
-            
+
             query = {
                 'portfolio': portfolio,
                 'org': org,
@@ -1465,32 +1595,32 @@ class GeneratePlan:
             response = self.DAC.get_a_b_query(query)
             if response and 'items' in response:
                 for item in response['items']:
-                    # Expect case records to have 'signature' and 'plan' fields
-                    signature_text = item.get('signature', '')
+                    # Expect case records to have 'intent' and 'plan' fields (trip_intent for backward compat)
+                    intent_text = item.get('intent', item.get('trip_intent', ''))
                     plan_data = item.get('plan', {})
-                    
-                    if signature_text and plan_data:
+
+                    if intent_text and plan_data:
                         cases.append({
-                            'signature': signature_text,
+                            'intent': intent_text,
                             'plan': plan_data
                         })
         except Exception as e:
             print(f'Warning: Could not load seed cases from database: {str(e)}')
-        
+
         return cases
-    
+
     def _load_facts(self, portfolio: str, org: str, fact_ring: str = "pes_seed_facts", case_group: str = None) -> List[Dict[str, Any]]:
         """
         Load facts from database (facts ring).
         Returns a list of fact dictionaries with 'text' and 'meta' keys.
         """
         facts = []
-        
+
         try:
             # Get all fact records from the ring
             if not case_group:
                 raise Exception('No case group')
-            
+
             query = {
                 'portfolio': portfolio,
                 'org': org,
@@ -1507,7 +1637,7 @@ class GeneratePlan:
                     # Expect fact records to have 'text' and 'meta' fields
                     text = item.get('text', '')
                     meta = item.get('meta', {})
-                    
+
                     if text:
                         facts.append({
                             'text': text,
@@ -1515,17 +1645,17 @@ class GeneratePlan:
                         })
         except Exception as e:
             print(f'Warning: Could not load facts from database: {str(e)}')
-        
+
         return facts
-    
-    
-    def build_plan_generator(self, portfolio: str, org: str, 
+
+
+    def build_intent_generator(self, portfolio: str, org: str,
                          prompt_ring: str = "pes_prompts",
                          action_ring: str = "schd_actions",
                          case_ring: str = "pes_cases",
                          fact_ring: str = "pes_facts",
-                         plan_actions: Union[str, List[str]] = "") -> Planner:
-        
+                         plan_actions: Union[str, List[str]] = "") -> IntentGenerator:
+
         embedder = SimpleEmbedder()
         vdb = VectorDB(embedder)
         # Pass the AgentUtilities instance to AIResponsesLLM
@@ -1534,83 +1664,80 @@ class GeneratePlan:
         # Get case_group from context
         context = self._get_context()
         case_group = context.case_group if context else None
-        
-        # USE PROMPTS ON THE LOCAL FILES
-        prompts = self._load_prompts_from_local_file()
 
-        # # Use prompts from initialization if available, otherwise load from database
-        # if self.prompts:
-        #     prompts = self.prompts
-        # else:
-        #     prompts = self._load_prompts(portfolio, org, prompt_ring, case_group=case_group)
-        
+        # Use prompts from initialization if available, otherwise load from database or package
+        if self.prompts:
+            prompts = self.prompts
+        else:
+            prompt_route = (context.init or {}).get('prompt_route') if context and isinstance(context.init, dict) else None
+            if prompt_route:
+                prompts = self._load_prompts_from_package(prompt_route)
+            else:
+                prompts = self._load_prompts(portfolio, org, prompt_ring, case_group=case_group)
 
         # Load actions from database
         action_catalog = self._load_actions(portfolio, org, action_ring)
-        
+
         # Filter action catalog to only include actions specified in plan_actions
         # plan_actions can be a list of strings or a comma-separated string (for backward compatibility)
-        action_catalog_specific = action_catalog
-        # action_catalog_specific = []
-        # if plan_actions:
-        #     # Normalize to a set: handle both list and comma-separated string formats
-        #     if isinstance(plan_actions, list):
-        #         plan_actions_set = {action.strip() for action in plan_actions if action.strip()}
-        #     else:
-        #         # Backward compatibility: parse comma-separated string
-        #         plan_actions_set = {action.strip() for action in plan_actions.split(',') if action.strip()}
-            
-        #     for a in action_catalog:
-        #         if a.key in plan_actions_set:
-        #             action_catalog_specific.append(a)
-  
-        # # Note: If no actions are loaded from database, action_catalog will be empty
-        # if not action_catalog_specific:
-        #     print('Warning: No actions loaded from database, action_catalog_specific will be empty')
+        action_catalog_specific = []
+        if plan_actions:
+            # Normalize to a set: handle both list and comma-separated string formats
+            if isinstance(plan_actions, list):
+                plan_actions_set = {action.strip() for action in plan_actions if action.strip()}
+            else:
+                # Backward compatibility: parse comma-separated string
+                plan_actions_set = {action.strip() for action in plan_actions.split(',') if action.strip()}
 
-        # USE SEED_CASES_FROM_LOCAL_FILE
-        seed_cases = self._load_seed_cases_from_local_file()
-        # if not seed_cases:
-        #     seed_cases = self._load_seed_cases(portfolio, org, case_ring, case_group=case_group)
+            for a in action_catalog:
+                if a.key in plan_actions_set:
+                    action_catalog_specific.append(a)
+
+        # Note: If no actions are loaded from database, action_catalog will be empty
+        if not action_catalog_specific:
+            print('Warning: No actions loaded from database, action_catalog_specific will be empty')
+
+        # Load seed cases from database
+        seed_cases = self._load_seed_cases(portfolio, org, case_ring, case_group=case_group)
 
         # Add seed cases to VectorDB
         for case_data in seed_cases:
-            signature_text = case_data.get('signature', '')
+            intent_text = case_data.get('intent', case_data.get('trip_intent', ''))
             plan_data = case_data.get('plan', {})
             meta = case_data.get('meta', {})
-            
-            if signature_text and plan_data:
+
+            if intent_text and plan_data:
                 vdb.add(kind="case",
-                       text=json.dumps({"signature": signature_text, "plan": plan_data}),
+                       text=json.dumps({"intent": intent_text, "plan": plan_data}),
                        meta=meta)
-        
+
         # Note: If no seed cases are loaded from database, VDB will be empty
         if not seed_cases:
             print('Warning: No seed cases loaded from database, VDB will be empty')
 
         # Load facts from database
         facts = self._load_facts(portfolio, org, fact_ring, case_group=case_group)
-        
+
         # Add facts to VectorDB
         for fact_data in facts:
             text = fact_data.get('text', '')
             kind = fact_data.get('kind', 'fact')
             meta = fact_data.get('meta', {})
-            
+
             if text:
                 vdb.add(kind=kind,
                        text=text,
                        meta=meta)
-        
+
         # Note: If no facts are loaded from database, VDB will not have facts
         if not facts:
             print('Warning: No facts loaded from database, VDB will not have facts')
 
-        return Planner(vdb=vdb, llm=llm, action_catalog=action_catalog_specific, prompts=prompts)
+        return IntentGenerator(vdb=vdb, llm=llm, action_catalog=action_catalog_specific, prompts=prompts)
 
-    
+
     def run(self, payload):
-        
+
         '''
         Payload
         {
@@ -1623,83 +1750,108 @@ class GeneratePlan:
         function = 'run > generate_plan'
         print(f'Running:{function}')
         context = RequestContext()
-        
+
         if 'portfolio' in payload:
             context.portfolio = payload['portfolio']
         else:
             return {'success':False,'function':function,'input':payload,'output':'No portfolio provided'}
-        
+
         if 'org' in payload:
             context.org = payload['org']
         else:
             return {'success':False,'function':function,'input':payload,'output':'No org provided'}
-        
+
         if 'case_group' in payload:
             context.case_group = payload['case_group']
         else:
-            # return {'success':False,'function':function,'input':payload,'output':'No case group provided'}
-            # TEMP: allow console requests without case_group (remove once console sends it)
-            context.case_group = os.getenv("PES_DEFAULT_CASE_GROUP", "default")
+            return {'success':False,'function':function,'input':payload,'output':'No case group provided'}
 
         if '_init' in payload:
             raw = payload['_init']
             context.init = json.loads(raw) if isinstance(raw, str) else raw
         else:
             context.init = {}
-            
-        
+
+
         try:
             self._set_context(context)
-            
-            # Create AgentUtilities with throw away entity_type, entity_id and thread 
-            # The reason is that this class doesn't write to the chat entity directly
-            # We are only initializing AGU because we need access to its LLM function
+
+            entity_type = payload.get('_entity_type') or 'some_entity_type'
+            entity_id = payload.get('_entity_id') or 'some_entity_id'
+            thread = payload.get('_thread') or 'some_thread'
+            workspace_id = payload.get('workspace_id') or payload.get('workspace')
+            public_user = payload.get('public_user')
+
             self.AGU = AgentUtilities(
                 self.config,
                 context.portfolio,
                 context.org,
-                'some_entity_type',
-                'some_entity_id',
-                'some_thread'
-            ) 
-            
+                entity_type,
+                entity_id,
+                thread
+            )
             print("Agent Utilities initialized")
-            
+
             if 'plan_actions' in context.init:
                 plan_actions = context.init['plan_actions']
-            else:    
+            else:
                 plan_actions = ''
-                
             print(f'Plan Actions loaded:{plan_actions}')
 
-            
             results = []
             print('Initializing PES>GeneratePlan')
-            planner = self.build_plan_generator(
+            intent_generator = self.build_intent_generator(
                 portfolio=context.portfolio,
                 org=context.org,
-                prompt_ring="pes_prompts",  # Can be made configurable
-                action_ring="schd_actions",  # Can be made configurable
-                case_ring="pes_cases",  # Can be made configurable
+                prompt_ring="pes_prompts",
+                action_ring="schd_actions",
+                case_ring="pes_cases",
                 plan_actions=plan_actions
             )
             print('Finished building Plan Generator')
-            
-            req = {
-            "request":payload["message"]
+
+            user_message = payload.get("message", "").strip()
+            req = {"request": user_message, "message": user_message}
+
+
+            # Step 1: Generate Intent
+
+            retrieved = intent_generator.retrieve(user_message, k_cases=4, k_facts=4, k_skills=6)
+            intent = intent_generator.to_intent(req, cases=retrieved.get('cases', []),
+                                       facts=retrieved.get('facts', []), skills=retrieved.get('skills', []))
+            if not intent:
+                return {'success': False, 'function': function, 'input': payload, 'output': 'Intent could not be extracted'}
+
+            self.AGU.mutate_workspace(
+                {'request_intent': intent},
+                public_user=public_user,
+                workspace_id=workspace_id
+            )
+            print('Intent stored in workspace')
+
+
+            # Step 2: Generate Plan
+
+            from pes_noma.handlers.propose_plan import ProposePlan
+            propose_payload = {
+                'portfolio': context.portfolio,
+                'org': context.org,
+                'case_group': context.case_group,
+                'intent': intent,
+                '_init': context.init,
+                '_entity_type': entity_type,
+                '_entity_id': entity_id,
+                '_thread': thread,
+                'cases': retrieved.get('cases', []),
             }
-            
-            
-            response_1 = planner.propose(req)
+            response_1 = ProposePlan().run(propose_payload)
             results.append(response_1)
-            if not response_1['success']: 
+            if not response_1.get('success'):
                 return {'success': False, 'output': results}
-            
-            # All went well, report back
-            canonical = results[-1]['output'] # This is a dictionary {'plan':{},'signature':{}}
+
+            canonical = results[-1]['output']
             return {'success': True, 'interface': 'plan', 'input': payload, 'output': canonical, 'stack': results}
-            
+
         except Exception as e:
             print(f'Error during execution: {str(e)}')
             return {'success': False, 'function': function, 'input': payload, 'output': f'ERROR:@generate_plan/run: {str(e)}'}
-

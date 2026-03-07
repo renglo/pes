@@ -5,7 +5,7 @@ This package provides custom handlers for the PES application.
 
 Usage:
     from pes_noma.handlers import ExampleHandler
-    
+
     # Use a handler
     handler = ExampleHandler()
     result = handler.run(payload)
@@ -23,16 +23,16 @@ HANDLERS = {
 def get_handler(handler_name: str):
     """
     Get a handler class by name.
-    
+
     Args:
         handler_name: Name of the handler (e.g., 'example_handler')
-        
+
     Returns:
         Handler class (not instantiated)
-        
+
     Raises:
         KeyError: If handler_name is not found
-        
+
     Example:
         handler_class = get_handler('example_handler')
         handler = handler_class()
@@ -41,18 +41,14 @@ def get_handler(handler_name: str):
     if handler_name not in HANDLERS:
         available = ', '.join(HANDLERS.keys())
         raise KeyError(f"Handler '{handler_name}' not found. Available handlers: {available}")
-    
+
     return HANDLERS[handler_name]()
 
 def list_handlers():
     """
     List all available handlers.
-    
+
     Returns:
         List of handler names
     """
     return list(HANDLERS.keys())
-
-
-
-
