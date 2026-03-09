@@ -380,6 +380,11 @@ class AIResponsesLLM:
                                     "destination": {"type": "string"},
                                     "depart_date": {"type": "string"},
                                     "passengers": {"type": "integer"},
+                                    "transport_mode": {
+                                        "type": "string",
+                                        "enum": ["flight", "train", "bus"],
+                                        "description": "Transport mode for this segment: flight (default), train, or bus"
+                                    },
                                     "traveler_ids": {
                                         "type": "array",
                                         "items": {"type": "string"},
@@ -816,13 +821,25 @@ TRIP TYPES:
 - day_trip: Same-day return, NO hotel (origin → dest → origin same day)
 - multi_city: A → B → C → ... → A (multiple cities, use "segments" and "itinerary")
 - converging: Multiple groups from different origins meeting at one destination (use "converging_travelers")
+- lodging_only: Hotel/lodging only, NO flights needed. Use when user asks only for hotel stay without mentioning flights or origin city. Requires: city/destination, check-in date, number of nights, number of guests. Origin and segments should be null/empty.
+
+TRANSPORT MODES:
+- "flight" (default): air travel between airports. Use IATA airport codes for origin/destination.
+- "train": rail travel between cities/stations. Use city names (e.g., "Prague", "Bratislava", "Vienna").
+- "bus": bus travel between cities/stations. Use city names.
+- When the user mentions "train", "rail", "bus", "coach", "ground transport", set transport_mode accordingly in EACH segment.
+- If transport mode is not mentioned, default to "flight".
 
 RULES:
-- Origin/destination: use IATA airport codes when possible (JFK, EWR, SFO, LAX, MIA, MCO, DFW, GRU, etc.)
+- Origin/destination for flights: use IATA airport codes when possible (JFK, EWR, SFO, LAX, MIA, MCO, DFW, GRU, etc.)
+- Origin/destination for train/bus: use city names (e.g., "Prague", "Bratislava", "Vienna", "Budapest")
 - travelers: {{"adults": N, "children": 0, "infants": 0}} - adults required
 - For "X days in Y" or "3 nights": check_out = check_in + nights; lodging.number_of_nights = X
-- Multi-city: output "segments" (one per flight leg) and "itinerary" [{{"from":"City","to":"City","date":"YYYY-MM-DD"}}]
+- Multi-city: output "segments" (one per transport leg) and "itinerary" [{{"from":"City","to":"City","date":"YYYY-MM-DD"}}]
 - Day trip: same date for outbound and return, lodging.needed = false, no stays
+- Lodging only: when user asks ONLY for hotel (no flights mentioned, no origin city), set trip_type to "lodging_only",
+  origin to null, segments to [], and populate stays with location_code (city name or IATA code), check_in, check_out, number_of_guests.
+  Set lodging.needed = true. If number of guests not specified, assume 1 adult.
 - Activities: Extract ALL requested (city_tour, restaurant, day_trip, theater, museum, spa, conference, meeting)
   Format: [{{"type":"city_tour","description":"guided tour","location":"City"}}]
 - Converging: converging_travelers = [{{"count":N,"origin":"City","arrival_date":"YYYY-MM-DD"}}]
@@ -832,12 +849,12 @@ RULES:
 TASK: TO_TRIP_INTENT
 Return ONLY valid JSON:
 {{
-  "origin": "IATA or null",
-  "destination": "IATA or null",
-  "trip_type": "single_destination|round_trip|one_way|day_trip|multi_city|converging or null",
+  "origin": "IATA or city name",
+  "destination": "IATA or city name",
+  "trip_type": "single_destination|round_trip|one_way|day_trip|multi_city|converging|lodging_only or null",
   "dates": {{"departure_date": "YYYY-MM-DD or null", "return_date": "YYYY-MM-DD or null"}},
-  "segments": [{{"origin": "IATA", "destination": "IATA", "depart_date": "YYYY-MM-DD", "passengers": N}}],
-  "stays": [{{"location_code": "IATA", "check_in": "YYYY-MM-DD", "check_out": "YYYY-MM-DD", "number_of_guests": N}}],
+  "segments": [{{"origin": "IATA or city", "destination": "IATA or city", "depart_date": "YYYY-MM-DD", "passengers": N, "transport_mode": "flight|train|bus"}}],
+  "stays": [{{"location_code": "IATA or city", "check_in": "YYYY-MM-DD", "check_out": "YYYY-MM-DD", "number_of_guests": N}}],
   "travelers": {{"adults": 1, "children": 0, "infants": 0}},
   "lodging": {{"needed": true, "check_in": "YYYY-MM-DD or null", "check_out": "YYYY-MM-DD or null", "number_of_nights": N or null}},
   "activities": [{{"type": "activity_type", "description": "details", "location": "where"}}],
@@ -976,13 +993,15 @@ User message: {user_message}
                 if not seg_tids and not converging:
                     seg_tids = traveler_ids_list
                 if o_code and d_code and depart:
+                    seg_transport = es.get("transport_mode", "flight")
+                    loc_type = "city" if seg_transport in ("train", "bus") else "airport"
                     seg = {
                         "segment_id": es.get("segment_id") or f"seg_{i}",
-                        "origin": {"type": "airport", "code": o_code},
-                        "destination": {"type": "airport", "code": d_code},
+                        "origin": {"type": loc_type, "code": o_code},
+                        "destination": {"type": loc_type, "code": d_code},
                         "depart_date": depart,
                         "passengers": pax,
-                        "transport_mode": es.get("transport_mode", "flight"),
+                        "transport_mode": seg_transport,
                         "depart_time_window": {"start": None, "end": None},
                     }
                     if seg_tids:
@@ -1132,6 +1151,18 @@ User message: {user_message}
             intent.setdefault("itinerary", {})["segments"] = segs
 
         dest_code = (segs[0].get("destination") or {}).get("code") if segs else dest
+        # For lodging_only (hotel-only requests): derive dest_code from stays when no segments exist
+        if not dest_code and not segs:
+            extracted_stays_for_dest = extracted.get("stays") or lod.get("stays") or []
+            if extracted_stays_for_dest:
+                first_stay_loc = extracted_stays_for_dest[0].get("location_code") or extracted_stays_for_dest[0].get("destination")
+                if first_stay_loc:
+                    dest_code = str(first_stay_loc).upper() if isinstance(first_stay_loc, str) else (first_stay_loc.get("code") if isinstance(first_stay_loc, dict) else None)
+            # Also try destination from extracted data (LLM may set destination even without segments)
+            if not dest_code:
+                ext_dest = extracted.get("destination")
+                if ext_dest:
+                    dest_code = str(ext_dest).upper() if isinstance(ext_dest, str) else (ext_dest.get("code") if isinstance(ext_dest, dict) else None)
         ret_date = clamp_date(dates.get("return_date")) or (clamp_date(lod.get("check_out")) if lod else None)
         if not ret_date and segs:
             for s in segs:
@@ -1253,6 +1284,10 @@ User message: {user_message}
 
         if trip_type == "day_trip":
             intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = False
+
+        if trip_type == "lodging_only":
+            intent.setdefault("itinerary", {}).setdefault("lodging", {})["needed"] = True
+            intent.setdefault("itinerary", {})["segments"] = []
 
         if extracted.get("extras"):
             for k, v in extracted["extras"].items():
@@ -1552,168 +1587,6 @@ Travel request: {user_message}"""
 
         if unresolved:
             intent["unresolved_travelers"] = unresolved
-
-        return intent
-
-    # ────────────────────────────────────────────────────────────────────────────
-    # Policy resolution
-    # ────────────────────────────────────────────────────────────────────────────
-
-    def _inject_policies_per_traveler(
-        self,
-        intent: Dict[str, Any],
-        traveler_ids: List[str],
-        portfolio: str,
-        org: str,
-    ) -> Dict[str, Any]:
-        """
-        For each resolved traveler ID, fetch their policy from noma_travel_policy
-        and store policy_id reference in travelers_by_id. Unique policies go in policies_by_id.
-        """
-        policy_cache: Dict[str, Any] = {}
-        travelers_by_id: Dict[str, Any] = (intent.get('party') or {}).get('travelers_by_id') or {}
-        policies_by_id: Dict[str, Any] = {}
-
-        for tid in traveler_ids:
-            if str(tid).startswith('t') and str(tid)[1:].isdigit():
-                continue
-            try:
-                attendant = self.DAC.get_a_b_c(portfolio, org, 'noma_attendants', tid)
-                if not attendant or not attendant.get('_id'):
-                    continue
-
-                policy_id = attendant.get('policy_id')
-                if not policy_id:
-                    continue
-
-                if policy_id not in policy_cache:
-                    policy_doc = self.DAC.get_a_b_c(portfolio, org, 'noma_travel_policy', policy_id)
-                    policy_cache[policy_id] = policy_doc if (policy_doc and policy_doc.get('_id')) else None
-
-                policy = policy_cache[policy_id]
-                if not policy:
-                    continue
-
-                if tid not in travelers_by_id:
-                    travelers_by_id[tid] = {}
-                travelers_by_id[tid]['policy_id'] = policy_id
-                policies_by_id[policy_id] = policy
-
-                print(f"[generate_plan] Policy '{policy.get('name')}' ({policy_id}) linked to traveler {tid}")
-
-            except Exception as e:
-                print(f"[generate_plan] _inject_policies_per_traveler error for {tid}: {e}")
-
-        intent.setdefault('party', {})['travelers_by_id'] = travelers_by_id
-        intent['party']['policies_by_id'] = policies_by_id
-        return intent
-
-    def _inject_policies_into_intent(self, intent: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Merge all traveler policies into intent.preferences and intent.constraints
-        using the most-restrictive rule.
-        """
-        try:
-            party = intent.get('party') or {}
-            travelers_by_id = party.get('travelers_by_id') or {}
-            policies_by_id = party.get('policies_by_id') or {}
-
-            referenced_policy_ids = {
-                t['policy_id'] for t in travelers_by_id.values()
-                if isinstance(t, dict) and t.get('policy_id')
-            }
-            policies = [
-                policies_by_id[pid] for pid in referenced_policy_ids
-                if pid in policies_by_id and isinstance(policies_by_id[pid], dict)
-            ]
-            if not policies:
-                return intent
-        except Exception as e:
-            print(f"[generate_plan] _inject_policies_into_intent aborted: {e}")
-            return intent
-
-        FLIGHT_CLASS_ORDER = ['economy', 'premium_economy', 'business', 'first']
-
-        def most_restrictive_class(classes):
-            idxs = []
-            for c in classes:
-                try:
-                    idxs.append(FLIGHT_CLASS_ORDER.index(str(c).lower()))
-                except (ValueError, TypeError):
-                    pass
-            if not idxs:
-                return None
-            return FLIGHT_CLASS_ORDER[min(idxs)]
-
-        def min_val(key):
-            vals = []
-            for p in policies:
-                v = p.get(key)
-                if v is not None:
-                    try:
-                        vals.append(float(v))
-                    except (TypeError, ValueError):
-                        pass
-            return min(vals) if vals else None
-
-        def all_bool(key):
-            vals = []
-            for p in policies:
-                v = p.get(key)
-                if v is not None:
-                    try:
-                        vals.append(bool(v))
-                    except (TypeError, ValueError):
-                        pass
-            return all(vals) if vals else None
-
-        def intersect_lists(key):
-            sets = []
-            for p in policies:
-                v = p.get(key)
-                if isinstance(v, list):
-                    sets.append(set(v))
-                elif isinstance(v, str) and v:
-                    sets.append({v})
-            if not sets:
-                return None
-            result = sets[0]
-            for s in sets[1:]:
-                result = result & s
-            return list(result)
-
-        try:
-            merged_class = most_restrictive_class([p.get('max_flight_class') for p in policies])
-            merged_flight_budget = min_val('max_flight_budget')
-            merged_hotel_stars = min_val('max_hotel_stars')
-            merged_hotel_rate = min_val('max_hotel_daily_rate')
-            merged_car_rental = all_bool('allowed_car_rental')
-            merged_services = intersect_lists('enabled_services')
-            currency = next((p['currency'] for p in policies if p.get('currency')), None)
-
-            flight_prefs = intent.setdefault('preferences', {}).setdefault('flight', {})
-            hotel_prefs = intent['preferences'].setdefault('hotel', {})
-            constraints = intent.setdefault('constraints', {})
-
-            if merged_class:
-                flight_prefs['max_class'] = merged_class
-            if merged_flight_budget is not None:
-                flight_prefs['max_budget'] = merged_flight_budget
-            if merged_hotel_stars is not None:
-                hotel_prefs['max_stars'] = merged_hotel_stars
-            if merged_hotel_rate is not None:
-                hotel_prefs['max_daily_rate'] = merged_hotel_rate
-            if merged_car_rental is not None:
-                constraints['allowed_car_rental'] = merged_car_rental
-            if merged_services is not None:
-                constraints['enabled_services'] = merged_services
-            if currency:
-                constraints['currency'] = currency
-
-            print(f"[generate_plan] Most-restrictive policy merged: class={merged_class}, flight_budget={merged_flight_budget}, hotel_stars={merged_hotel_stars}, hotel_rate={merged_hotel_rate}")
-        except Exception as e:
-            print(f"[generate_plan] _inject_policies_into_intent merge failed: {e}")
-            import traceback; traceback.print_exc()
 
         return intent
 
@@ -2153,16 +2026,6 @@ Travel request: {user_message}"""
                 context.org,
             )
             print(f"[generate_plan] Intent after traveler resolution: traveler_ids={intent.get('party', {}).get('traveler_ids')}")
-
-            # Step 1c: Attach each traveler's policy into intent.party + merge most restrictive
-            resolved_ids = (intent.get('party') or {}).get('traveler_ids') or []
-            intent = self._inject_policies_per_traveler(
-                intent,
-                resolved_ids,
-                context.portfolio,
-                context.org,
-            )
-            intent = self._inject_policies_into_intent(intent)
 
             self.AGU.mutate_workspace(
                 {'request_intent': intent},
