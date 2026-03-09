@@ -1,5 +1,5 @@
 """
-PES NomaPackage
+PES Noma Package
 Custom handlers, blueprints, and utilities for the PES platform
 """
 
@@ -8,7 +8,7 @@ from setuptools import setup, find_packages
 setup(
     name="pes-noma-mod",
     version="1.0.0",
-    description="PES custom handlers, blueprints, and utilities",
+    description="PES custom handlers, blueprints, and utilities - ",
     author="PES Team",
     packages=find_packages(),
     python_requires=">=3.12",

@@ -123,8 +123,13 @@ class ProposePlan:
                             if isinstance(slots_data, dict):
                                 required_args = slots_data.get('required', [])
                                 optional_args = slots_data.get('optional', [])
-                        except Exception:
-                            pass
+                            elif isinstance(slots_data, list):
+                                required_args = slots_data
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            # If not JSON, try parsing as comma-separated or newline-separated
+                            if isinstance(slots, str):
+                                parts = [p.strip() for p in slots.replace('\n', ',').split(',') if p.strip()]
+                                required_args = parts
                     if key:
                         actions.append(ActionSpec(
                             key=key,
@@ -173,7 +178,7 @@ class ProposePlan:
             inputs = step.inputs or {}
             if inputs.get("traveler_ids"):
                 continue
-            if step.action == "quote_flight" and seg_idx < len(segs):
+            if step.action in ("quote_flight", "quote_train_bus") and seg_idx < len(segs):
                 seg = segs[seg_idx]
                 tids = seg.get("traveler_ids") or party_tids
                 if tids:
@@ -234,24 +239,44 @@ class ProposePlan:
             dep = seg.get("depart_date")
             pax = seg.get("passengers", default_pax)
             tids = seg.get("traveler_ids") or []
+            transport_mode = (seg.get("transport_mode") or "flight").lower()
             if o_code and d_code and dep:
-                steps.append(PlanStep(
-                    step_id=len(steps),
-                    title=f"{o_code} to {d_code} flight",
-                    action="quote_flight",
-                    inputs={
-                        "from_airport_code": o_code,
-                        "to_airport_code": d_code,
-                        "departure_date": dep,
-                        "leg": leg,
-                        "passengers": pax,
-                        "traveler_ids": tids,
-                    },
-                    enter_guard="True",
-                    success_criteria="len(result) > 0",
-                    depends_on=[len(steps) - 1] if len(steps) > 0 else [],
-                    next_step=None,
-                ))
+                if transport_mode in ("train", "bus"):
+                    steps.append(PlanStep(
+                        step_id=len(steps),
+                        title=f"{o_code} to {d_code} {transport_mode}",
+                        action="quote_train_bus",
+                        inputs={
+                            "departure_city": o_code,
+                            "arrival_city": d_code,
+                            "departure_date": dep,
+                            "leg": leg,
+                            "passengers": pax,
+                            "traveler_ids": tids,
+                        },
+                        enter_guard="True",
+                        success_criteria="verify_quote_train_bus",
+                        depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                        next_step=None,
+                    ))
+                else:
+                    steps.append(PlanStep(
+                        step_id=len(steps),
+                        title=f"{o_code} to {d_code} flight",
+                        action="quote_flight",
+                        inputs={
+                            "from_airport_code": o_code,
+                            "to_airport_code": d_code,
+                            "departure_date": dep,
+                            "leg": leg,
+                            "passengers": pax,
+                            "traveler_ids": tids,
+                        },
+                        enter_guard="True",
+                        success_criteria="len(result) > 0",
+                        depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                        next_step=None,
+                    ))
                 leg += 1
 
         prev_stay_loc = None
@@ -272,24 +297,44 @@ class ProposePlan:
                         dep = seg.get("depart_date")
                         pax = seg.get("passengers", default_pax)
                         seg_tids = seg.get("traveler_ids") or []
+                        seg_transport = (seg.get("transport_mode") or "flight").lower()
                         if o and d and dep:
-                            steps.append(PlanStep(
-                                step_id=len(steps),
-                                title=f"{o} to {d} flight",
-                                action="quote_flight",
-                                inputs={
-                                    "from_airport_code": o,
-                                    "to_airport_code": d,
-                                    "departure_date": dep,
-                                    "leg": leg,
-                                    "passengers": pax,
-                                    "traveler_ids": seg_tids,
-                                },
-                                enter_guard="True",
-                                success_criteria="len(result) > 0",
-                                depends_on=[len(steps) - 1] if len(steps) > 0 else [],
-                                next_step=None,
-                            ))
+                            if seg_transport in ("train", "bus"):
+                                steps.append(PlanStep(
+                                    step_id=len(steps),
+                                    title=f"{o} to {d} {seg_transport}",
+                                    action="quote_train_bus",
+                                    inputs={
+                                        "departure_city": o,
+                                        "arrival_city": d,
+                                        "departure_date": dep,
+                                        "leg": leg,
+                                        "passengers": pax,
+                                        "traveler_ids": seg_tids,
+                                    },
+                                    enter_guard="True",
+                                    success_criteria="verify_quote_train_bus",
+                                    depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                                    next_step=None,
+                                ))
+                            else:
+                                steps.append(PlanStep(
+                                    step_id=len(steps),
+                                    title=f"{o} to {d} flight",
+                                    action="quote_flight",
+                                    inputs={
+                                        "from_airport_code": o,
+                                        "to_airport_code": d,
+                                        "departure_date": dep,
+                                        "leg": leg,
+                                        "passengers": pax,
+                                        "traveler_ids": seg_tids,
+                                    },
+                                    enter_guard="True",
+                                    success_criteria="len(result) > 0",
+                                    depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                                    next_step=None,
+                                ))
                             leg += 1
                         break
             prev_stay_loc = loc_code
@@ -325,24 +370,44 @@ class ProposePlan:
             dep = seg.get("depart_date")
             pax = seg.get("passengers", default_pax)
             tids = seg.get("traveler_ids") or []
+            transport_mode = (seg.get("transport_mode") or "flight").lower()
             if o_code and d_code and dep:
-                steps.append(PlanStep(
-                    step_id=len(steps),
-                    title=f"{o_code} to {d_code} flight",
-                    action="quote_flight",
-                    inputs={
-                        "from_airport_code": o_code,
-                        "to_airport_code": d_code,
-                        "departure_date": dep,
-                        "leg": leg,
-                        "passengers": pax,
-                        "traveler_ids": tids,
-                    },
-                    enter_guard="True",
-                    success_criteria="len(result) > 0",
-                    depends_on=[len(steps) - 1] if len(steps) > 0 else [],
-                    next_step=None,
-                ))
+                if transport_mode in ("train", "bus"):
+                    steps.append(PlanStep(
+                        step_id=len(steps),
+                        title=f"{o_code} to {d_code} {transport_mode}",
+                        action="quote_train_bus",
+                        inputs={
+                            "departure_city": o_code,
+                            "arrival_city": d_code,
+                            "departure_date": dep,
+                            "leg": leg,
+                            "passengers": pax,
+                            "traveler_ids": tids,
+                        },
+                        enter_guard="True",
+                        success_criteria="verify_quote_train_bus",
+                        depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                        next_step=None,
+                    ))
+                else:
+                    steps.append(PlanStep(
+                        step_id=len(steps),
+                        title=f"{o_code} to {d_code} flight",
+                        action="quote_flight",
+                        inputs={
+                            "from_airport_code": o_code,
+                            "to_airport_code": d_code,
+                            "departure_date": dep,
+                            "leg": leg,
+                            "passengers": pax,
+                            "traveler_ids": tids,
+                        },
+                        enter_guard="True",
+                        success_criteria="len(result) > 0",
+                        depends_on=[len(steps) - 1] if len(steps) > 0 else [],
+                        next_step=None,
+                    ))
                 leg += 1
 
         for i, step in enumerate(steps):
@@ -350,7 +415,8 @@ class ProposePlan:
             step.next_step = None if i == len(steps) - 1 else i + 1
             step.depends_on = [i - 1] if i > 0 else []
 
-        return Plan(id=plan_id, steps=steps, meta={"strategy": "programmatic"})
+        strategy = "programmatic_lodging_only" if (not segs and stays_list) else "programmatic"
+        return Plan(id=plan_id, steps=steps, meta={"strategy": strategy})
 
     def compose_plan_light(self, intent: Dict[str, Any], action_catalog: List[ActionSpec]) -> Plan:
         """Build plan from intent programmatically."""
