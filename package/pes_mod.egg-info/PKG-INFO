@@ -6,6 +6,7 @@ Author: PES Team
 Requires-Python: >=3.12
 Requires-Dist: requests>=2.32.0
 Requires-Dist: google-search-results>=2.4.2
+Requires-Dist: pyyaml>=6.0
 Provides-Extra: dev
 Requires-Dist: pytest>=7.0.0; extra == "dev"
 Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
