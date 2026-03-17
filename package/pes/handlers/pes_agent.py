@@ -97,6 +97,8 @@ class RequestContext:
         Continuity ID for resuming execution
     message : str
         User message text
+    case_group : str
+        Case group for prompts/seed cases (e.g. 'remediation'); can be forced from payload.
     """
     connection_id: str = ''
     portfolio: str = ''
@@ -120,6 +122,7 @@ class RequestContext:
     list_tools: List[Dict[str, Any]] = field(default_factory=list)
     next: str = ''
     message: str = ''
+    case_group: str = ''
     state_machine: Dict[str, Any] = field(default_factory=dict)
 
 # Create a context variable to store the request context
@@ -1002,6 +1005,8 @@ class PesAgent:
             if 'data' in payload:
                 context.message = payload['data']
 
+            if 'case_group' in payload and payload['case_group']:
+                context.case_group = payload['case_group']
 
             print('Initializing Agent utilities ...')
             self.AGU = AgentUtilities(
@@ -1131,10 +1136,6 @@ class PesAgent:
                                 
                 else:
                     # Step 2: Act. Agent runs the tool
-                    extra = {
-                        'case_group':'x'
-                        }
-                    
                     #Validate that response_2['output'] has this format inside : ['tool_calls'][0]['function']['name'] before calling act
                     try:
                         tool_calls = response_2['output'].get('tool_calls', [])
@@ -1171,10 +1172,13 @@ class PesAgent:
                             'error': f'Invalid response_2 format: {str(e)}',
                             'output': results
                         }
-                        
-                    
-                    
-                    response_3 = self.act(response_2['output'], extra = extra)
+
+                    # Force case_group from payload when calling generate_plan so PES uses the right prompts/seed cases
+                    extra = {}
+                    if tool_name == 'generate_plan' and getattr(self._get_context(), 'case_group', ''):
+                        extra['case_group'] = self._get_context().case_group
+
+                    response_3 = self.act(response_2['output'], extra=extra)
                     results.append(response_3)
                         
                     if not response_3['success']:

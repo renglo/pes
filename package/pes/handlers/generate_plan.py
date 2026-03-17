@@ -538,7 +538,7 @@ class PlanAgent:
             replacements = {
                 'request_text': request_text,
                 'current_time': current_time
-            }
+            } 
             print(f'[DEBUG] Token replacements: {replacements}')
             prompt = self._replace_tokens(prompt_template, replacements)
             # Verify token replacement
@@ -678,9 +678,9 @@ class PlanAgent:
         if prompt_template:
             # Compute values for tokens
             sig_text = sig.to_text()
-            example_cases_json = json.dumps(example_cases, indent=2)
-            fact_texts_json = json.dumps(fact_texts, indent=2)
-            catalog_summary_json = json.dumps(catalog_summary, indent=2)
+            example_cases_json = json.dumps(example_cases, indent=2, cls=DecimalEncoder)
+            fact_texts_json = json.dumps(fact_texts, indent=2, cls=DecimalEncoder)
+            catalog_summary_json = json.dumps(catalog_summary, indent=2, cls=DecimalEncoder)
             plan_id = uuid.uuid4().hex[:8]
             
             # Replace tokens with computed values
@@ -752,7 +752,7 @@ class PlanAgent:
                             "action": "actionName",
                             "inputs": {{"arg1": "value1", ...}},
                             "enter_guard": "True",
-                            "success_criteria": "appropriate criteria",
+                            "success_criteria": "Short measurable description of what done means for this step",
                             "depends_on": [],
                             "next_step": 1
                         }},
@@ -762,7 +762,7 @@ class PlanAgent:
                             "action": "actionName",
                             "inputs": {{"arg1": "value1", ...}},
                             "enter_guard": "True",
-                            "success_criteria": "appropriate criteria",
+                            "success_criteria": "Short measurable description of what done means for this step",
                             "depends_on": [0],
                             "next_step": null
                         }}
@@ -778,7 +778,7 @@ class PlanAgent:
             - action: Must match an action name from the ACTION CATALOG
             - inputs: Object with all required_args from the action spec, plus any optional_args
             - enter_guard: Boolean expression (typically "True")
-            - success_criteria: Expression to evaluate step success
+            - success_criteria: REQUIRED, non-empty. Short measurable description of what "done" means for this step (e.g. "Identify public exposure", "Bucket secured"). Use action success_criteria_hint when available. Do not leave blank.
             
             CHRONOLOGICAL ORDER (CRITICAL):
             - Steps MUST be listed in the order they occur in time
@@ -824,8 +824,10 @@ class PlanAgent:
         return validated_plan
 
     # 4) Compose plan via LLM with explicit Action Catalog, then validate
-    def compose_from_skills(self, sig: Signature, skills: List[VDBItem]) -> Plan:
+    def compose_from_skills(self, sig: Signature, skills: List[VDBItem], facts: List[VDBItem] = None) -> Plan:
         print('Composing a new plan from scratch based on the user request...')
+        if facts is None:
+            facts = []
         catalog = [{
             "name": t.key,
             "description": t.description,
@@ -839,8 +841,9 @@ class PlanAgent:
         if prompt_template:
             # Compute values for tokens
             sig_text = sig.to_text()
-            catalog_json = json.dumps(catalog, indent=2)
-            skills_json = json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2)
+            catalog_json = json.dumps(catalog, indent=2, cls=DecimalEncoder)
+            skills_json = json.dumps([{"id": s.id, "text": s.text, "meta": s.meta} for s in skills], indent=2, cls=DecimalEncoder)
+            fact_texts_json = json.dumps([{"text": f.text, "meta": f.meta} for f in facts], indent=2, cls=DecimalEncoder)
             plan_id = uuid.uuid4().hex[:8]
             
             # Replace tokens with computed values
@@ -848,6 +851,7 @@ class PlanAgent:
                 'sig_text': sig_text,
                 'catalog': catalog_json,
                 'skills': skills_json,
+                'fact_texts': fact_texts_json,
                 'plan_id': plan_id
             }
             prompt = self._replace_tokens(prompt_template, replacements)
@@ -874,7 +878,7 @@ class PlanAgent:
             USING THE ACTION CATALOG:
             - Each action has required_args that MUST be provided in step.inputs
             - Optional_args can be included if relevant
-            - Use action.success_criteria_hint as a guide for step.success_criteria
+            - Each step MUST have a non-empty success_criteria: use action.success_criteria_hint as guide, or write a short measurable description of what "done" means for that step. Do not leave blank or use placeholders.
             - Ensure all action inputs are populated with values from the signature
             
             INCORPORATING SIGNATURE INFORMATION:
@@ -910,7 +914,7 @@ class PlanAgent:
             "action": "<actionName from ACTION_CATALOG>",
             "inputs": {{"required_arg": "value", ...}},
             "enter_guard": "True",
-            "success_criteria": "from action hint",
+            "success_criteria": "Short measurable description of what done means for this step",
             "depends_on": [],
             "next_step": 1
             }}
@@ -923,7 +927,7 @@ class PlanAgent:
             - action: Must match an action name from the ACTION_CATALOG
             - inputs: Object containing all required_args from the action spec, plus any optional_args
             - enter_guard: Boolean expression (typically "True")
-            - success_criteria: Expression to evaluate whether the step succeeded
+            - success_criteria: REQUIRED, non-empty. Short measurable description of what "done" means for this step. Use action success_criteria_hint when available. Do not leave blank.
             
             CHRONOLOGICAL ORDER (CRITICAL):
             - Steps MUST be listed in the order they occur in time
@@ -1113,9 +1117,11 @@ class PlanAgent:
                 provided_keys = list(inputs.keys()) if inputs else []
                 continue
             
-            # Populate optional fields if not present
-            if not s.success_criteria and spec.success_criteria_hint:
+            # Populate optional fields if not present; success_criteria is required
+            if not (s.success_criteria and s.success_criteria.strip()) and spec.success_criteria_hint:
                 s.success_criteria = spec.success_criteria_hint
+            if not (s.success_criteria and s.success_criteria.strip()):
+                s.success_criteria = "Step completed successfully"
             if not s.enter_guard:
                 s.enter_guard = "True"
             print(f'    ACCEPTED')
@@ -1150,7 +1156,7 @@ class PlanAgent:
             case_objects = [self._vdb_case_to_case(c) for c in cases[:3]]
             adapted = self.adapt_from_cases(case_objects, sig, facts)
             candidate_plans.append(adapted)
-        composed = self.compose_from_skills(sig, skills[:4])
+        composed = self.compose_from_skills(sig, skills[:4], facts=facts)
         candidate_plans.append(composed)
 
         final = self.select_plan(sig, candidate_plans)
@@ -1460,7 +1466,7 @@ class GeneratePlan:
             
             if signature_text and plan_data:
                 vdb.add(kind="case",
-                       text=json.dumps({"signature": signature_text, "plan": plan_data}),
+                       text=json.dumps({"signature": signature_text, "plan": plan_data}, cls=DecimalEncoder),
                        meta=meta)
         
         # Note: If no seed cases are loaded from database, VDB will be empty

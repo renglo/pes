@@ -79,6 +79,11 @@ class RequestContext:
     continuity: Dict[str, Any] = field(default_factory=dict)
     message: str = ''
     tool_response_c_id: str = ''
+    success_criteria: str = ''
+    title: str = ''
+    inputs: Dict[str, Any] = field(default_factory=dict)
+    step_id: str = ''
+    current_action: str = ''
 
 # Create a context variable to store the request context
 request_context: ContextVar[RequestContext] = ContextVar('request_context', default=RequestContext())
@@ -237,6 +242,10 @@ class Specialist:
                 { "role": "system", "content": current_desire }, # CURRENT_DESIRE
                 
             ]
+            # Success criteria for this step (when present) to guide tool selection and completion
+            success_criteria = (self._get_context().success_criteria or '').strip()
+            if success_criteria:
+                messages.append({ "role": "system", "content": f"Success criteria for this step: {success_criteria}" })
             
             # Add the incoming messages
             for msg in message_list:      
@@ -389,7 +398,8 @@ class Specialist:
                     # This is the LLM asking for a tool to be executed.
                     selected_tool = validated_result['tool_calls'][0]['function']['name']
                     
-                    if (continuity['tool_step'] == '3' or continuity['tool_step'] == '4' ) and continuity['action_step'] == selected_tool :
+                    #if (continuity['tool_step'] == '3' or continuity['tool_step'] == '4' ) and continuity['action_step'] == selected_tool :
+                    if True:
                         print(f'Interpret() >> Run this tool:{validated_result}')
                         # The last message was a response to "3 = WAITING HUMAN".
                         # The continuity response matches with the selected_tool. Execute tool
@@ -931,6 +941,7 @@ class Specialist:
             # Step information
             context.inputs = payload.get('inputs',{})
             context.title = payload.get('title','')
+            context.success_criteria = payload.get('success_criteria', '') or ''
             
             context.step_id = payload.get('step_id','')
             context.current_action = payload.get('action', '')

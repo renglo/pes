@@ -111,9 +111,7 @@ class ExecutePlan:
             raise ValueError(f"Step {step['step_id']} is missing 'inputs'")
         if not isinstance(inputs, dict):
             raise TypeError(f"Step {step['step_id']} 'inputs' must be a dict")
-        # Example: ensure inputs are not empty
-        if len(inputs) == 0:
-            raise ValueError(f"Step {step['step_id']} has empty 'inputs'")
+        # Note: allow empty inputs for actions with no required args.
 
     def _guard_check(self, step: Dict[str, Any], state: Dict[str, Any]) -> bool:
         """

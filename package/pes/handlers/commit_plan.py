@@ -442,8 +442,6 @@ class CommitPlan:
             print('Signature:',signature)
             return {'success':True,'action':action,'input':'','output':plan}
             
-        
-                
         except Exception as e:
             print(f'Error in find_in_cache: {str(e)}')
             return {
@@ -452,9 +450,6 @@ class CommitPlan:
                 'error': f'Error in find_in_cache: {str(e)}',
                 'output': 0
             }
-            
-     
-     
             
     def add_plan(self,plan):
         function = 'add_plan'
