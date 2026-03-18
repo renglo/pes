@@ -1549,9 +1549,20 @@ class GeneratePlan:
                 case_ring="pes_cases"  # Can be made configurable
             )
             print('Finished building Plan Generator')
-            
+
+            # Prefer full remediation logs over the chat summary.
+            # In remediation flows, the original event JSON is typically in payload['logs'],
+            # payload['enriched_log'], or payload['data'].
+            request_obj = (
+                payload.get("logs")
+                or payload.get("enriched_log")
+                or payload.get("data")
+                or payload.get("message", "")
+            )
+            request_text = request_obj if isinstance(request_obj, str) else json.dumps(request_obj)
+
             req = {
-            "request":payload["message"]
+                "request": request_text
             }
             
             
