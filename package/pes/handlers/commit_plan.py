@@ -25,6 +25,16 @@ class DecimalEncoder(json.JSONEncoder):
             return float(obj)
         return super(DecimalEncoder, self).default(obj)
 
+def _inner_context(entity_type: str, entity_id: str, thread: str):
+    """When stacked (outer/inner), return innermost part. Workspaces are stored at inner level."""
+    def last_part(v, sep="/"):
+        if not v or sep not in str(v):
+            return v
+        parts = [p.strip() for p in str(v).split(sep) if p.strip()]
+        return parts[-1] if parts else v
+    return last_part(entity_type), last_part(entity_id), last_part(thread)
+
+
 @dataclass
 class RequestContext:
     portfolio: str = ''
@@ -392,11 +402,13 @@ class CommitPlan:
             entity_id = self._get_context().entity_id
             thread = self._get_context().thread
             init = self._get_context().init
-            
-            
-                                
-            # Get the workspaces in this thread 
-            response = self.CHC.list_workspaces(portfolio,org,entity_type,entity_id,thread) 
+
+            # Workspaces are stored at inner (trip) level. When stacked (org-handle/org-trip),
+            # use innermost part for list_workspaces.
+            et_inner, eid_inner, th_inner = _inner_context(entity_type, entity_id, thread)
+
+            # Get the workspaces in this thread
+            response = self.CHC.list_workspaces(portfolio, org, et_inner, eid_inner, th_inner) 
             workspaces_list = response['items']
             print('WORKSPACES_LIST >>',workspaces_list)
             
@@ -540,7 +552,7 @@ class CommitPlan:
             context.init = payload['_init']
         else:
             context.init = {}
-                
+
         self._set_context(context)
         
         
@@ -555,13 +567,21 @@ class CommitPlan:
         
         
         results = []
-        
-        response_1 = self.find_in_cache()
-        results.append(response_1)
-        if not response_1['success']: 
-            return {'success': False, 'output': results}
-        
-        response_2 = self.add_plan_and_intent(response_1['output'])
+
+        plan_inline = payload.get('plan')
+        if isinstance(plan_inline, dict) and plan_inline:
+            intent_inline = payload.get('intent')
+            if not isinstance(intent_inline, dict):
+                intent_inline = {}
+            plan_and_intent = {'plan': plan_inline, 'intent': intent_inline}
+        else:
+            response_1 = self.find_in_cache()
+            results.append(response_1)
+            if not response_1['success']:
+                return {'success': False, 'output': results}
+            plan_and_intent = response_1['output']
+
+        response_2 = self.add_plan_and_intent(plan_and_intent)
         results.append(response_2)
         if not response_2['success']: 
             return {'success': False, 'output': results}
