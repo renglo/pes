@@ -355,6 +355,7 @@ class ExecutePlan:
             
             print("Starting plan execution...")
             loop = 0
+            passthrough_next = None
             # This is the plan_steps loop
             for step in plan["steps"]:
                 loop = loop+1
@@ -521,6 +522,7 @@ class ExecutePlan:
                     
                     
                     if status == 'awaiting':
+                        passthrough_next = result.get('output', {}).get('next')
                         print(f'The step has status {status}.')   
                         # Breaking the loop to wait for answer from user. Loop will be regenerated with the Continuity id.
                         break
@@ -569,12 +571,15 @@ class ExecutePlan:
             '''
             
 
-            return {
+            out = {
                 "success": True,
                 "function": function,
                 "input": payload,
                 "output": '',
             }
+            if passthrough_next:
+                out["next"] = passthrough_next
+            return out
 
         except Exception as e:
 
