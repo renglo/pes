@@ -566,16 +566,16 @@ class AIResponsesLLM:
                                 "type": "object",
                                 "properties": {
                                     "type": {"type": "string", "enum": ["extend_stay", "shorten_stay", "add_side_trip", "change_dates"]},
-                                    "until_date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                                    "add_nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
-                                    "remove_nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
-                                    "city": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                                    "nights": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
-                                    "departure_date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                                    "return_date": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+                                    "until_date": {"type": ["string", "null"]},
+                                    "add_nights": {"type": ["integer", "null"]},
+                                    "remove_nights": {"type": ["integer", "null"]},
+                                    "city": {"type": ["string", "null"]},
+                                    "nights": {"type": ["integer", "null"]},
+                                    "departure_date": {"type": ["string", "null"]},
+                                    "return_date": {"type": ["string", "null"]}
                                 },
                                 "required": ["type"],
-                                "additionalProperties": True
+                                "additionalProperties": False
                             }
                         }
                     },

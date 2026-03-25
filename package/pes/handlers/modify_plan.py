@@ -279,8 +279,18 @@ Return ONLY valid JSON:
 
     def _apply_shorten_stay(self, intent: Dict[str, Any], change: Dict[str, Any], now_date: str) -> None:
         until = _clamp_date_mod(change.get("until_date"), now_date)
+        remove_nights = change.get("remove_nights")
         lod = intent.setdefault("itinerary", {}).setdefault("lodging", {})
         stays = lod.get("stays") or []
+        if not until and remove_nights is not None:
+            last_co = None
+            for s in stays:
+                co = _parse_date_mod(s.get("check_out"))
+                if co and (last_co is None or co > last_co):
+                    last_co = co
+            if last_co:
+                new_co = (last_co - timedelta(days=int(remove_nights))).strftime("%Y-%m-%d")
+                until = _clamp_date_mod(new_co, now_date)
         if until:
             for s in stays:
                 s["check_out"] = until
