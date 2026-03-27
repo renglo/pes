@@ -1332,18 +1332,71 @@ User message: {user_message}
 request_context: ContextVar[RequestContext] = ContextVar('request_context', default=RequestContext())
 
 
+# Keys recognized in package YAML files (pes_prompts parity)
+PACKAGE_PROMPT_KEYS = (
+    "to_intent",
+    "compose_plan",
+    "modify_intent_delta",
+    "compose_plan_light",
+    "modify_plan",
+)
+
+
+def load_prompts_from_package_route(package_route: str) -> Dict[str, str]:
+    """
+    Load PES prompt YAMLs from importlib.resources (e.g. apollo.prompts.pes).
+    Shared by GeneratePlan, ModifyPlan, and ProposePlan.
+    """
+    print("Using prompts from package")
+    prompts: Dict[str, str] = {k: "" for k in PACKAGE_PROMPT_KEYS}
+    if not yaml:
+        print("Warning: PyYAML not installed. Cannot load prompts from package.")
+        return prompts
+    try:
+        parts = package_route.split(".")
+        if not parts:
+            raise ValueError("package_route must be non-empty (e.g. apollo.prompts.pes)")
+        package_name = parts[0]
+        path_parts = parts[1:] if len(parts) > 1 else []
+        resource_root = importlib.resources.files(package_name)
+        for p in path_parts:
+            resource_root = resource_root / p
+        if not resource_root.is_dir():
+            raise FileNotFoundError(f"Package resource path does not exist: {package_route}")
+        for entry in resource_root.iterdir():
+            if entry.name.endswith(".yaml") or entry.name.endswith(".yml"):
+                try:
+                    with importlib.resources.as_file(entry) as f:
+                        with open(f, "r") as fp:
+                            raw = yaml.safe_load(fp)
+                    if not isinstance(raw, dict):
+                        continue
+                    key = (raw.get("key") or "").lower()
+                    prompt_text = raw.get("prompt", "") or ""
+                    if prompt_text:
+                        prompt_text = prompt_text.lstrip()
+                    if key in prompts:
+                        prompts[key] = prompt_text
+                except Exception as e:
+                    print(f"Warning: Could not load prompt from {entry.name}: {e}")
+    except Exception as e:
+        print(f"Warning: Could not load prompts from package {package_route}: {e}")
+    return prompts
+
 
 class GeneratePlan:
-    def __init__(self, prompts: Optional[Dict[str, str]] = None):
+    def __init__(self, prompts: Optional[Dict[str, str]] = None, prompt_route: Optional[str] = None):
         # Load config for handlers (independent of Flask)
         self.config = load_config()
-        
+
         self.AGU = None
         self.DAC = DataController(config=self.config)
         self.BPC = BlueprintController(config=self.config)
-        
+
         # Store prompts passed during initialization (from text files or database)
         self.prompts = prompts or {}
+        # Optional importlib package path for YAML prompts (overridable per request via _init.prompt_route)
+        self.prompt_route = prompt_route
         
 
     def _get_context(self) -> RequestContext:
@@ -1415,54 +1468,10 @@ class GeneratePlan:
     def _load_prompts_from_package(self, package_route: str) -> Dict[str, str]:
         """
         Load prompts from a Python package using importlib.resources.
-        Works regardless of filesystem location (installed package, zip, etc.).
-
-        Args:
-            package_route: Dotted path to the package subdirectory containing prompt YAML files.
-                          Example: 'noma.prompts.pes' loads from noma/prompts/pes/*.yaml
-
-        Returns:
-            Dictionary with keys: 'to_intent', 'compose_plan'
+        Delegates to load_prompts_from_package_route; returns keys used by GeneratePlan.
         """
-        print('Using prompts from package')
-        
-        prompts = {
-            'to_intent': '',
-            'compose_plan': ''
-        }
-        if not yaml:
-            print('Warning: PyYAML not installed. Cannot load prompts from package.')
-            return prompts
-        try:
-            parts = package_route.split('.')
-            if not parts:
-                raise ValueError('package_route must be non-empty (e.g. noma.prompts.pes)')
-            package_name = parts[0]
-            path_parts = parts[1:] if len(parts) > 1 else []
-            resource_root = importlib.resources.files(package_name)
-            for p in path_parts:
-                resource_root = resource_root / p
-            if not resource_root.is_dir():
-                raise FileNotFoundError(f'Package resource path does not exist: {package_route}')
-            for entry in resource_root.iterdir():
-                if entry.name.endswith('.yaml') or entry.name.endswith('.yml'):
-                    try:
-                        with importlib.resources.as_file(entry) as f:
-                            with open(f, 'r') as fp:
-                                raw = yaml.safe_load(fp)
-                        if not isinstance(raw, dict):
-                            continue
-                        key = (raw.get('key') or '').lower()
-                        prompt_text = raw.get('prompt', '') or ''
-                        if prompt_text:
-                            prompt_text = prompt_text.lstrip()
-                        if key in prompts:
-                            prompts[key] = prompt_text
-                    except Exception as e:
-                        print(f'Warning: Could not load prompt from {entry.name}: {e}')
-        except Exception as e:
-            print(f'Warning: Could not load prompts from package {package_route}: {e}')
-        return prompts
+        loaded = load_prompts_from_package_route(package_route)
+        return {"to_intent": loaded.get("to_intent", ""), "compose_plan": loaded.get("compose_plan", "")}
     
     def _load_actions(self, portfolio: str, org: str, action_ring: str = "schd_actions") -> List[ActionSpec]:
         """
@@ -1634,9 +1643,13 @@ class GeneratePlan:
         if self.prompts:
             prompts = self.prompts
         else:
-            prompt_route = (context.init or {}).get('prompt_route') if context and isinstance(context.init, dict) else None
-            if prompt_route:
-                prompts = self._load_prompts_from_package(prompt_route)
+            effective_route = None
+            if context and isinstance(context.init, dict):
+                effective_route = context.init.get("prompt_route") or None
+            if not effective_route:
+                effective_route = getattr(self, "prompt_route", None)
+            if effective_route:
+                prompts = self._load_prompts_from_package(effective_route)
             else:
                 prompts = self._load_prompts(portfolio, org, prompt_ring, case_group=case_group)
         
@@ -1763,6 +1776,8 @@ class GeneratePlan:
                 plan_actions = ''
             print(f'Plan Actions loaded:{plan_actions}')
 
+            effective_prompt_route = (context.init or {}).get('prompt_route') or getattr(self, 'prompt_route', None)
+
             results = []
             print('Initializing PES>GeneratePlan')
             intent_generator = self.build_intent_generator(
@@ -1809,7 +1824,9 @@ class GeneratePlan:
                 '_thread': thread,
                 'cases': retrieved.get('cases', []),
             }
-            response_1 = ProposePlan().run(propose_payload)
+            if self.prompts and (self.prompts.get('compose_plan') or '').strip():
+                propose_payload['_prompts'] = {'compose_plan': self.prompts['compose_plan']}
+            response_1 = ProposePlan(prompt_route=effective_prompt_route).run(propose_payload)
             results.append(response_1)
             if not response_1.get('success'):
                 return {'success': False, 'output': results}

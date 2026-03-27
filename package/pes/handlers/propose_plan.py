@@ -22,6 +22,7 @@ from pes.handlers.generate_plan import (
     intent_for_plan,
     DecimalEncoder,
     AIResponsesLLM,
+    load_prompts_from_package_route,
 )
 
 
@@ -59,13 +60,17 @@ class ProposePlan:
     Standalone handler: intent in, plan out.
     Contains all plan composition logic. No dependency on IntentGenerator for composition.
     Payload: portfolio, org, case_group, intent, _init (optional), cases (optional)
+    Optional: prompt_route (or constructor prompt_route) — if set, compose_plan is loaded from
+    package YAML via load_prompts_from_package_route; if unset, compose_plan is loaded from DB only.
+    Optional: _prompts { compose_plan } — inline prompts (e.g. when GeneratePlan was constructed with prompts=).
     Output: { success, output: { plan, intent } }
     """
 
-    def __init__(self):
+    def __init__(self, prompt_route: Optional[str] = None):
         self.config = load_config()
         self.DAC = DataController(config=self.config)
         self.AGU = None
+        self.prompt_route = (prompt_route or "").strip() or None
 
     def _get_context(self):
         return request_context.get()
@@ -73,40 +78,57 @@ class ProposePlan:
     def _set_context(self, ctx):
         request_context.set(ctx)
 
-    def _load_prompts(self, portfolio: str, org: str, prompt_ring: str = "pes_prompts", case_group: str = None) -> Dict[str, str]:
-        prompts = {'compose_plan': ''}
+    def _load_prompts(
+        self,
+        portfolio: str,
+        org: str,
+        prompt_ring: str = "pes_prompts",
+        case_group: str = None,
+        prompt_route: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """
+        Load compose_plan prompt. If prompt_route is set, load from package YAML only.
+        If not set, load from pes_prompts in the database only (no local YAML fallback).
+        """
+        prompts: Dict[str, str] = {"compose_plan": ""}
+        route = (prompt_route or "").strip()
+        if route:
+            try:
+                loaded = load_prompts_from_package_route(route)
+                prompts["compose_plan"] = (loaded.get("compose_plan") or "").strip()
+            except Exception as e:
+                print(f"Warning: Could not load compose_plan from package {route}: {e}")
+            return prompts
         try:
             if case_group:
                 query = {
-                    'portfolio': portfolio, 'org': org, 'ring': prompt_ring,
-                    'value': case_group, 'limit': 99, 'operator': 'begins_with',
-                    'lastkey': None, 'sort': 'asc'
+                    "portfolio": portfolio,
+                    "org": org,
+                    "ring": prompt_ring,
+                    "value": case_group,
+                    "limit": 99,
+                    "operator": "begins_with",
+                    "lastkey": None,
+                    "sort": "asc",
                 }
                 response = self.DAC.get_a_b_query(query)
-                if response and 'items' in response:
-                    for item in response['items']:
-                        key = item.get('key', '').lower()
-                        prompt_text = (item.get('prompt') or '').lstrip()
-                        if key == 'compose_plan' and prompt_text:
-                            prompts['compose_plan'] = prompt_text
+                if response and "items" in response:
+                    for item in response["items"]:
+                        key = item.get("key", "").lower()
+                        prompt_text = (item.get("prompt") or "").lstrip()
+                        if key == "compose_plan" and prompt_text:
+                            prompts["compose_plan"] = prompt_text
         except Exception as e:
-            print(f'Warning: Could not load prompts from database: {e}')
-        if not prompts.get('compose_plan'):
-            try:
-                import yaml
-                import importlib.resources
-                resource_root = importlib.resources.files('noma') / 'prompts' / 'pes'
-                for entry in resource_root.iterdir():
-                    if entry.name.endswith(('.yaml', '.yml')) and 'compose_plan' in entry.name:
-                        with importlib.resources.as_file(entry) as f:
-                            with open(f, 'r') as fp:
-                                raw = yaml.safe_load(fp)
-                        if isinstance(raw, dict) and (raw.get('key') or '').lower() == 'compose_plan':
-                            prompts['compose_plan'] = (raw.get('prompt') or '').lstrip()
-                            break
-            except Exception as e:
-                print(f'Warning: Could not load compose_plan from package: {e}')
+            print(f"Warning: Could not load prompts from database: {e}")
         return prompts
+
+    def _resolve_compose_prompts(self, payload: Dict[str, Any], portfolio: str, org: str, case_group: str) -> Dict[str, str]:
+        """Prefer inline _prompts from caller; then prompt_route (payload or constructor); else DB."""
+        inlined = payload.get("_prompts")
+        if isinstance(inlined, dict) and (inlined.get("compose_plan") or "").strip():
+            return {"compose_plan": inlined["compose_plan"]}
+        route = (payload.get("prompt_route") or self.prompt_route or "").strip() or None
+        return self._load_prompts(portfolio, org, case_group=case_group, prompt_route=route)
 
     def _load_actions(self, portfolio: str, org: str, action_ring: str = "schd_actions") -> List:
         actions = []
@@ -465,7 +487,7 @@ Each PlanStep: {{"step_id": 0, "title": "...", "action": "<from catalog>", "inpu
             self._set_context(ctx)
 
             llm = AIResponsesLLM(self.AGU)
-            prompts = self._load_prompts(portfolio, org, case_group=case_group)
+            prompts = self._resolve_compose_prompts(payload, portfolio, org, case_group)
             action_catalog = self._load_actions(portfolio, org)
 
             if plan_actions:
