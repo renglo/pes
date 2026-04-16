@@ -565,14 +565,34 @@ class AIResponsesLLM:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "type": {"type": "string", "enum": ["extend_stay", "shorten_stay", "add_side_trip", "change_dates"]},
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "extend_stay",
+                                            "shorten_stay",
+                                            "add_side_trip",
+                                            "change_dates",
+                                            "update_party",
+                                            "update_lodging",
+                                            "update_route",
+                                        ],
+                                    },
                                     "until_date": {"type": ["string", "null"]},
                                     "add_nights": {"type": ["integer", "null"]},
                                     "remove_nights": {"type": ["integer", "null"]},
                                     "city": {"type": ["string", "null"]},
                                     "nights": {"type": ["integer", "null"]},
                                     "departure_date": {"type": ["string", "null"]},
-                                    "return_date": {"type": ["string", "null"]}
+                                    "return_date": {"type": ["string", "null"]},
+                                    "location_hint": {"type": ["string", "null"]},
+                                    "number_of_nights": {"type": ["integer", "null"]},
+                                    "check_in": {"type": ["string", "null"]},
+                                    "check_out": {"type": ["string", "null"]},
+                                    "origin": {"type": ["string", "null"]},
+                                    "destination": {"type": ["string", "null"]},
+                                    "adults": {"type": ["integer", "null"]},
+                                    "children": {"type": ["integer", "null"]},
+                                    "infants": {"type": ["integer", "null"]},
                                 },
                                 "required": ["type"],
                                 "additionalProperties": False
@@ -779,7 +799,7 @@ class IntentGenerator:
             for c in cases[:3]:
                 try:
                     obj = json.loads(c.text)
-                    ex_message = obj.get("description","")
+                    ex_message = obj.get("description", "") or (c.meta or {}).get("description", "")
                     ex_intent = obj.get("intent", {})
                     ex_plan = obj.get("plan",{})
                     if ex_intent:
@@ -1563,11 +1583,13 @@ class GeneratePlan:
                     # Expect case records to have 'intent' and 'plan' fields (trip_intent for backward compat)
                     intent_text = item.get('intent', item.get('trip_intent', ''))
                     plan_data = item.get('plan', {})
+                    description = item.get('description','')
                     
                     if intent_text and plan_data:
                         cases.append({
                             'intent': intent_text,
-                            'plan': plan_data
+                            'plan': plan_data,
+                            'description': description
                         })
         except Exception as e:
             print(f'Warning: Could not load seed cases from database: {str(e)}')
@@ -1669,11 +1691,17 @@ class GeneratePlan:
         for case_data in seed_cases:
             intent_text = case_data.get('intent', case_data.get('trip_intent', ''))
             plan_data = case_data.get('plan', {})
+            description = case_data.get('description', '')
             meta = case_data.get('meta', {})
             
             if intent_text and plan_data:
+                # to_intent() reads description from json.loads(c.text) for example "message" fields
                 vdb.add(kind="case",
-                       text=json.dumps({"intent": intent_text, "plan": plan_data}),
+                       text=json.dumps({
+                           "intent": intent_text,
+                           "plan": plan_data,
+                           "description": description,
+                       }),
                        meta=meta)
         
         # Note: If no seed cases are loaded from database, VDB will be empty

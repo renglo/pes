@@ -24,6 +24,31 @@ from renglo.blueprint.blueprint_controller import BlueprintController
 from contextvars import ContextVar
 
 
+def _modify_plan_trace(msg: str, payload: Any = None, limit: int = 4000) -> None:
+    """
+    Debug trace for intent delta / apply flow. Default ON (unset env).
+    Silence with: MODIFY_PLAN_DEBUG=0  or  false  no  off
+    """
+    raw = os.environ.get("MODIFY_PLAN_DEBUG", "1")
+    if str(raw).strip().lower() in ("0", "false", "no", "off"):
+        return
+    line = f"[modify_plan TRACE] {msg}"
+    if payload is None:
+        print(line)
+        return
+    try:
+        if isinstance(payload, (dict, list)):
+            s = json.dumps(payload, indent=2, default=str)
+        else:
+            s = str(payload)
+    except Exception as ex:
+        s = f"<could not serialize: {ex}>"
+    if len(s) > limit:
+        total = len(s)
+        s = s[:limit] + f"\n... [truncated from {total} chars]"
+    print(f"{line}\n{s}")
+
+
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal):
@@ -129,7 +154,13 @@ def _intent_summary_for_delta(intent: Dict[str, Any]) -> Dict[str, Any]:
             for s in segs
         ],
         "stays": [{"location_code": s.get("location_code"), "check_in": s.get("check_in"), "check_out": s.get("check_out")} for s in stays],
-        "lodging": {"check_in": lod.get("check_in"), "check_out": lod.get("check_out"), "number_of_nights": lod.get("number_of_nights")},
+        "lodging": {
+            "check_in": lod.get("check_in"),
+            "check_out": lod.get("check_out"),
+            "number_of_nights": lod.get("number_of_nights"),
+            "location_hint": lod.get("location_hint"),
+            "needed": lod.get("needed"),
+        },
     }
 
 
@@ -149,9 +180,42 @@ class IntentModifier:
 
     def modify(self, base_intent: Dict[str, Any], user_correction: str,
                cases: Optional[List] = None) -> Optional[Dict[str, Any]]:
+        iti0 = base_intent.get("itinerary") or {}
+        lod0 = iti0.get("lodging") or {}
+        _modify_plan_trace(
+            "IntentModifier.modify() enter",
+            {
+                "user_correction_len": len(user_correction or ""),
+                "user_correction_preview": (user_correction or "")[:240],
+                "base_intent_keys": sorted(base_intent.keys()) if isinstance(base_intent, dict) else None,
+                "segments_count": len(iti0.get("segments") or []),
+                "stays_count": len(lod0.get("stays") or []),
+                "lodging_number_of_nights": lod0.get("number_of_nights"),
+                "party_travelers": (base_intent.get("party") or {}).get("travelers"),
+                "seed_cases_count": len(cases) if cases is not None else 0,
+            },
+        )
         delta = self._extract_delta(base_intent, user_correction, cases=cases)
-        if not delta or not delta.get("changes"):
+        if not delta:
+            _modify_plan_trace(
+                "IntentModifier.modify() abort: _extract_delta returned None or empty dict",
+                {"delta": delta},
+            )
             return None
+        ch = delta.get("changes")
+        if not isinstance(ch, list):
+            _modify_plan_trace(
+                "IntentModifier.modify() abort: delta['changes'] is not a list",
+                {"changes_type": type(ch).__name__, "delta_keys": list(delta.keys())},
+            )
+            return None
+        if len(ch) == 0:
+            _modify_plan_trace(
+                "IntentModifier.modify() abort: delta['changes'] is empty list (LLM returned no ops)",
+                {"delta": delta},
+            )
+            return None
+        _modify_plan_trace("IntentModifier.modify() delta accepted", {"changes": ch})
         intent = copy.deepcopy(base_intent)
         intent["request"] = intent.get("request") or {}
         try:
@@ -161,22 +225,71 @@ class IntentModifier:
         now_date = datetime.now(tz).strftime("%Y-%m-%d")
         intent["request"]["now_date"] = now_date
         intent["request"]["user_message"] = user_correction
-        for change in delta.get("changes", []):
+        for i, change in enumerate(delta.get("changes", [])):
+            _modify_plan_trace(f"IntentModifier.modify() applying change[{i}]", change)
             self._apply_change(intent, change, now_date)
         intent["updated_at"] = int(time.time())
+        iti1 = intent.get("itinerary") or {}
+        lod1 = iti1.get("lodging") or {}
+        _modify_plan_trace(
+            "IntentModifier.modify() exit (intent snapshot)",
+            {
+                "segments_count": len(iti1.get("segments") or []),
+                "stays_count": len(lod1.get("stays") or []),
+                "lodging": {
+                    "check_in": lod1.get("check_in"),
+                    "check_out": lod1.get("check_out"),
+                    "number_of_nights": lod1.get("number_of_nights"),
+                },
+                "party_travelers": (intent.get("party") or {}).get("travelers"),
+                "first_segment": (iti1.get("segments") or [None])[0],
+            },
+        )
         return intent
 
     def _extract_delta(self, base_intent: Dict[str, Any], user_correction: str,
                        cases: Optional[List] = None) -> Optional[Dict[str, Any]]:
         prompt_template = self.prompts.get("modify_intent_delta", "") or self._default_delta_prompt()
+        prompt_source = "prompts.modify_intent_delta" if self.prompts.get("modify_intent_delta") else "_default_delta_prompt()"
         existing = _intent_summary_for_delta(base_intent)
         modification_examples = self._build_modification_examples(cases)
         prompt = prompt_template.replace("#existing_intent#", json.dumps(existing, indent=2))
         prompt = prompt.replace("#user_correction#", user_correction)
         prompt = prompt.replace("#now_date#", datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d"))
         prompt = prompt.replace("#modification_examples#", modification_examples)
+        _modify_plan_trace(
+            "_extract_delta() built prompt",
+            {
+                "prompt_source": prompt_source,
+                "prompt_chars": len(prompt),
+                "existing_intent_summary": existing,
+                "modification_examples_chars": len(modification_examples or ""),
+            },
+        )
+        _modify_plan_trace("_extract_delta() prompt (full)", prompt, limit=12000)
         data = self._get_llm().complete_json(prompt)
-        if not data or not isinstance(data.get("changes"), list):
+        _modify_plan_trace(
+            "_extract_delta() complete_json() raw result",
+            data if isinstance(data, dict) else {"non_dict": type(data).__name__, "value": data},
+        )
+        if not data:
+            _modify_plan_trace("_extract_delta() fail: complete_json returned falsy", None)
+            return None
+        if not isinstance(data, dict):
+            _modify_plan_trace("_extract_delta() fail: result is not a dict", {"type": type(data).__name__})
+            return None
+        ch = data.get("changes")
+        if not isinstance(ch, list):
+            _modify_plan_trace(
+                "_extract_delta() fail: 'changes' missing or not a list",
+                {"top_level_keys": list(data.keys()), "changes": ch, "changes_type": type(ch).__name__},
+            )
+            return None
+        if len(ch) == 0:
+            _modify_plan_trace(
+                "_extract_delta() fail: 'changes' is empty (schema may allow only extend_stay/shorten_stay/add_side_trip/change_dates)",
+                data,
+            )
             return None
         return data
 
@@ -216,6 +329,9 @@ CHANGE TYPES:
 - shorten_stay: User wants to leave earlier. Use until_date or remove_nights.
 - add_side_trip: "Add X nights in [City]", "stop in [City] before going home" = add city BEFORE return. Use city (IATA) and nights.
 - change_dates: User changes departure or return. Use departure_date and/or return_date.
+- update_party: User changes passenger counts. Use adults, children, infants (integers).
+- update_lodging: User sets main hotel destination, nights, or stay dates during intake (empty segments). Use location_hint (IATA), number_of_nights, check_in, check_out (YYYY-MM-DD).
+- update_route: User names origin and destination cities/airports for the main trip (especially when segments are empty). Use origin, destination (IATA), departure_date. Creates or updates the first outbound segment and aligns lodging.check_in when missing.
 
 SIMILAR INTENTS (canonical examples):
 #modification_examples#
@@ -231,7 +347,10 @@ Return ONLY valid JSON:
   "changes": [
     {"type": "extend_stay", "until_date": "YYYY-MM-DD"},
     {"type": "add_side_trip", "city": "LAS", "nights": 2},
-    {"type": "change_dates", "departure_date": "YYYY-MM-DD", "return_date": "YYYY-MM-DD"}
+    {"type": "change_dates", "departure_date": "YYYY-MM-DD", "return_date": "YYYY-MM-DD"},
+    {"type": "update_party", "adults": 2, "children": 0, "infants": 0},
+    {"type": "update_lodging", "location_hint": "LAS", "number_of_nights": 5, "check_in": "YYYY-MM-DD"},
+    {"type": "update_route", "origin": "SAN", "destination": "LAS", "departure_date": "YYYY-MM-DD"}
   ]
 }
 """
@@ -246,6 +365,90 @@ Return ONLY valid JSON:
             self._apply_add_side_trip(intent, change, now_date)
         elif ctype == "change_dates":
             self._apply_change_dates(intent, change, now_date)
+        elif ctype == "update_party":
+            self._apply_update_party(intent, change, now_date)
+        elif ctype == "update_lodging":
+            self._apply_update_lodging(intent, change, now_date)
+        elif ctype == "update_route":
+            self._apply_update_route(intent, change, now_date)
+        else:
+            _modify_plan_trace(
+                "_apply_change() NO-OP: unknown change type (not handled by modify_plan)",
+                {"type": ctype, "change": change},
+            )
+
+    def _apply_update_party(self, intent: Dict[str, Any], change: Dict[str, Any], now_date: str) -> None:
+        party = intent.setdefault("party", {})
+        tr = party.setdefault("travelers", {"adults": 0, "children": 0, "infants": 0})
+        for k in ("adults", "children", "infants"):
+            if change.get(k) is not None:
+                try:
+                    tr[k] = max(0, int(change[k]))
+                except (TypeError, ValueError):
+                    pass
+
+    def _apply_update_lodging(self, intent: Dict[str, Any], change: Dict[str, Any], now_date: str) -> None:
+        lod = intent.setdefault("itinerary", {}).setdefault("lodging", {})
+        hint = change.get("location_hint")
+        if hint:
+            lod["location_hint"] = str(hint).strip().upper()[:8]
+        if change.get("number_of_nights") is not None:
+            try:
+                lod["number_of_nights"] = max(0, int(change["number_of_nights"]))
+            except (TypeError, ValueError):
+                pass
+        ci = _clamp_date_mod(change.get("check_in"), now_date)
+        co = _clamp_date_mod(change.get("check_out"), now_date)
+        if ci:
+            lod["check_in"] = ci
+        if co:
+            lod["check_out"] = co
+        n = lod.get("number_of_nights")
+        ci_dt = _parse_date_mod(lod.get("check_in"))
+        if ci_dt and n is not None and lod.get("check_out") in (None, ""):
+            co2 = ci_dt + timedelta(days=int(n))
+            lod["check_out"] = _clamp_date_mod(co2.strftime("%Y-%m-%d"), now_date)
+
+    def _apply_update_route(self, intent: Dict[str, Any], change: Dict[str, Any], now_date: str) -> None:
+        origin = (change.get("origin") or "").strip().upper()[:3]
+        dest = (change.get("destination") or "").strip().upper()[:3]
+        dep = _clamp_date_mod(change.get("departure_date"), now_date)
+        iti = intent.setdefault("itinerary", {})
+        lod = iti.setdefault("lodging", {})
+        if dest:
+            lod["location_hint"] = dest
+        party = intent.setdefault("party", {})
+        travelers = party.get("travelers") or {}
+        try:
+            pax = max(1, int(travelers.get("adults") or 1))
+        except (TypeError, ValueError):
+            pax = 1
+        tids = party.get("traveler_ids") or []
+        if tids:
+            pax = max(1, len(tids))
+        segs = list(iti.get("segments") or [])
+        if origin and dest and dep:
+            if not segs:
+                seg: Dict[str, Any] = {
+                    "segment_id": "seg_0",
+                    "origin": {"type": "airport", "code": origin},
+                    "destination": {"type": "airport", "code": dest},
+                    "depart_date": dep,
+                    "passengers": pax,
+                    "transport_mode": "flight",
+                    "depart_time_window": {"start": None, "end": None},
+                }
+                if tids:
+                    seg["traveler_ids"] = list(tids)
+                segs.append(seg)
+            else:
+                s0 = segs[0]
+                s0["depart_date"] = dep
+                s0["origin"] = {"type": "airport", "code": origin}
+                s0["destination"] = {"type": "airport", "code": dest}
+            if not lod.get("check_in"):
+                lod["check_in"] = dep
+        iti["segments"] = segs
 
     def _apply_extend_stay(self, intent: Dict[str, Any], change: Dict[str, Any], now_date: str) -> None:
         until = _clamp_date_mod(change.get("until_date"), now_date)
@@ -722,8 +925,8 @@ class ModifyPlan:
         if 'message' not in payload:
             return {'success':False,'function':function,'input':payload,'output':'No modification request (message) provided'}
         
-        if 'plan' not in payload:
-            return {'success':False,'function':function,'input':payload,'output':'No existing plan provided'}
+        if 'intent' not in payload:
+            return {'success':False,'function':function,'input':payload,'output':'No existing intent provided'}
         
         if '_init' in payload:
             raw = payload['_init']
@@ -757,7 +960,8 @@ class ModifyPlan:
             print('Initializing PES>ModifyPlan')
             plan_actions = (context.init.get('plan_actions') or None) if isinstance(context.init, dict) else None
             
-            base_intent = payload.get('intent')
+            raw_intent = payload.get('intent')
+            base_intent = json.loads(raw_intent) if isinstance(raw_intent, str) else raw_intent
             modification_request = payload['message']
             if not base_intent or not isinstance(base_intent, dict):
                 return {'success': False, 'function': function, 'input': payload, 'output': 'ERROR:@modify_plan/run: No intent provided. Plan modification requires intent from generate_plan cache.'}
@@ -774,6 +978,11 @@ class ModifyPlan:
                 )[:3]
                 updated_intent = modifier.modify(base_intent, modification_request, cases=cases)
                 if not updated_intent:
+                    _modify_plan_trace(
+                        "ModifyPlan.run() modifier.modify() returned None — check TRACE lines above "
+                        "(empty LLM changes, wrong JSON shape, or only unsupported change types).",
+                        {"modification_request_preview": (modification_request or "")[:300]},
+                    )
                     return {'success': False, 'function': function, 'input': payload, 'output': 'ERROR:@modify_plan/run: Could not update intent from modification request.'}
                 try:
                     from inca.handlers import Patcher
