@@ -2,7 +2,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Tuple, Union
 import copy
-import importlib.resources
 import json
 import time
 import uuid
@@ -22,6 +21,8 @@ from renglo.data.data_controller import DataController
 from renglo.blueprint.blueprint_controller import BlueprintController
 
 from contextvars import ContextVar
+
+from pes.handlers.generate_plan import load_prompts_from_package_route
 
 
 def _modify_plan_trace(msg: str, payload: Any = None, limit: int = 4000) -> None:
@@ -654,16 +655,17 @@ Step 2: Propose plan (ProposePlan handler).
 '''
 
 class ModifyPlan:
-    def __init__(self, prompts: Optional[Dict[str, str]] = None):
+    def __init__(self, prompts: Optional[Dict[str, str]] = None, prompt_route: Optional[str] = None):
         # Load config for handlers (independent of Flask)
         self.config = load_config()
-        
+
         self.AGU = None
         self.DAC = DataController(config=self.config)
         self.BPC = BlueprintController(config=self.config)
-        
+
         # Store prompts passed during initialization (from text files or database)
         self.prompts = prompts or {}
+        self.prompt_route = prompt_route
         
 
     def _get_context(self) -> RequestContext:
@@ -740,58 +742,15 @@ class ModifyPlan:
 
     def _load_prompts_from_package(self, package_route: str) -> Dict[str, str]:
         """
-        Load prompts from a Python package using importlib.resources.
-        Works regardless of filesystem location (installed package, zip, etc.).
-
-        Args:
-            package_route: Dotted path to the package subdirectory containing prompt YAML files.
-                          Example: 'noma.prompts.pes' loads from noma/prompts/pes/*.yaml
-
-        Returns:
-            Dictionary with keys: 'to_intent', 'modify_intent_delta', 'compose_plan_light', 'modify_plan'
+        Load prompts from a Python package. Delegates to load_prompts_from_package_route.
         """
-        
-        print('Using prompts from package')
-        
-        prompts = {
-            'to_intent': '',
-            'modify_intent_delta': '',
-            'compose_plan_light': '',
-            'modify_plan': ''
+        loaded = load_prompts_from_package_route(package_route)
+        return {
+            "to_intent": loaded.get("to_intent", ""),
+            "modify_intent_delta": loaded.get("modify_intent_delta", ""),
+            "compose_plan_light": loaded.get("compose_plan_light", ""),
+            "modify_plan": loaded.get("modify_plan", ""),
         }
-        if not yaml:
-            print('Warning: PyYAML not installed. Cannot load prompts from package.')
-            return prompts
-        try:
-            parts = package_route.split('.')
-            if not parts:
-                raise ValueError('package_route must be non-empty (e.g. noma.prompts.pes)')
-            package_name = parts[0]
-            path_parts = parts[1:] if len(parts) > 1 else []
-            resource_root = importlib.resources.files(package_name)
-            for p in path_parts:
-                resource_root = resource_root / p
-            if not resource_root.is_dir():
-                raise FileNotFoundError(f'Package resource path does not exist: {package_route}')
-            for entry in resource_root.iterdir():
-                if entry.name.endswith('.yaml') or entry.name.endswith('.yml'):
-                    try:
-                        with importlib.resources.as_file(entry) as f:
-                            with open(f, 'r') as fp:
-                                raw = yaml.safe_load(fp)
-                        if not isinstance(raw, dict):
-                            continue
-                        key = (raw.get('key') or '').lower()
-                        prompt_text = raw.get('prompt', '') or ''
-                        if prompt_text:
-                            prompt_text = prompt_text.lstrip()
-                        if key in prompts:
-                            prompts[key] = prompt_text
-                    except Exception as e:
-                        print(f'Warning: Could not load prompt from {entry.name}: {e}')
-        except Exception as e:
-            print(f'Warning: Could not load prompts from package {package_route}: {e}')
-        return prompts
 
     def _load_seed_cases(self, portfolio: str, org: str, case_ring: str = "pes_cases", case_group: str = None) -> List[Dict[str, Any]]:
         """Load cases from database. Returns list of {'intent', 'plan'} dicts."""
@@ -966,9 +925,13 @@ class ModifyPlan:
             if not base_intent or not isinstance(base_intent, dict):
                 return {'success': False, 'function': function, 'input': payload, 'output': 'ERROR:@modify_plan/run: No intent provided. Plan modification requires intent from generate_plan cache.'}
             try:
-                prompt_route = (context.init or {}).get('prompt_route') if isinstance(context.init, dict) else None
-                if prompt_route:
-                    prompts = self._load_prompts_from_package(prompt_route)
+                effective_prompt_route = None
+                if isinstance(context.init, dict):
+                    effective_prompt_route = context.init.get('prompt_route') or None
+                if not effective_prompt_route:
+                    effective_prompt_route = getattr(self, 'prompt_route', None)
+                if effective_prompt_route:
+                    prompts = self._load_prompts_from_package(effective_prompt_route)
                 else:
                     prompts = self._load_prompts(context.portfolio, context.org, case_group=context.case_group)
                 modifier = IntentModifier(agu=self.AGU, prompts=prompts)
@@ -998,7 +961,9 @@ class ModifyPlan:
                     'intent': updated_intent,
                     '_init': context.init,
                 }
-                response = ProposePlan().run(propose_payload)
+                if self.prompts and (self.prompts.get('compose_plan') or '').strip():
+                    propose_payload['_prompts'] = {'compose_plan': self.prompts['compose_plan']}
+                response = ProposePlan(prompt_route=effective_prompt_route).run(propose_payload)
                 if response.get('success') and response.get('output'):
                     canonical = {
                         "plan": response["output"]["plan"],
