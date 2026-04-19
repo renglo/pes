@@ -374,14 +374,27 @@ class ProposePlan:
 
         return Plan(id=plan_id, steps=steps, meta={"strategy": "programmatic"})
 
-    def compose_plan_light(self, intent: Dict[str, Any], action_catalog: List[ActionSpec]) -> Plan:
+    def compose_plan_light(
+        self,
+        intent: Dict[str, Any],
+        action_catalog: List[ActionSpec],
+        target_plan_id: Optional[str] = None,
+    ) -> Plan:
         """Build plan from intent programmatically."""
-        plan_id = uuid.uuid4().hex[:8]
+        tid = (target_plan_id or '').strip()
+        plan_id = tid or uuid.uuid4().hex[:8]
         plan = self._build_plan_from_intent(intent, plan_id, action_catalog)
         return self._validate_and_patch_plan(plan, action_catalog)
 
-    def compose_from_cases(self, intent: Dict[str, Any], llm: AIResponsesLLM, action_catalog: List[ActionSpec],
-                          prompts: Dict[str, str], cases: Optional[List[VDBItem]] = None) -> Plan:
+    def compose_from_cases(
+        self,
+        intent: Dict[str, Any],
+        llm: AIResponsesLLM,
+        action_catalog: List[ActionSpec],
+        prompts: Dict[str, str],
+        cases: Optional[List[VDBItem]] = None,
+        target_plan_id: Optional[str] = None,
+    ) -> Plan:
         """Compose plan from intent using LLM. Cases provide canonical intent→plan examples."""
         print('Composing plan from intent (with cases as examples)...')
         catalog = [{
@@ -417,7 +430,8 @@ class ProposePlan:
                 plan_examples = json.dumps(examples, indent=2, cls=DecimalEncoder)
 
         prompt_template = prompts.get('compose_plan', '')
-        plan_id = uuid.uuid4().hex[:8]
+        tid = (target_plan_id or '').strip()
+        plan_id = tid or uuid.uuid4().hex[:8]
         if prompt_template:
             replacements = {
                 'intent_text': intent_json,
@@ -454,7 +468,8 @@ Each PlanStep: {{"step_id": 0, "title": "...", "action": "<from catalog>", "inpu
             except Exception as e:
                 print(f'[ERROR] Failed to create PlanStep from step {idx}: {e}')
                 continue
-        plan = Plan(id=data["plan"]["id"], steps=steps, meta=data["plan"].get("meta", {}))
+        resolved_id = tid or data['plan'].get('id') or plan_id
+        plan = Plan(id=resolved_id, steps=steps, meta=data['plan'].get('meta', {}))
         plan = self._inject_traveler_ids_from_intent(plan, intent)
         return self._validate_and_patch_plan(plan, action_catalog)
 
@@ -498,12 +513,26 @@ Each PlanStep: {{"step_id": 0, "title": "...", "action": "<from catalog>", "inpu
                 action_catalog = [a for a in action_catalog if a.key in plan_actions_set]
 
             use_compose_from_cases = init.get('use_compose_from_cases', False)
+            tid = (
+                payload.get('target_plan_id') or payload.get('_target_plan_id') or ''
+            )
+            tid = str(tid).strip() or None
             if use_compose_from_cases:
                 cases = payload.get('cases') or []
-                plan = self.compose_from_cases(intent, llm=llm, action_catalog=action_catalog,
-                                               prompts=prompts, cases=cases)
+                plan = self.compose_from_cases(
+                    intent,
+                    llm=llm,
+                    action_catalog=action_catalog,
+                    prompts=prompts,
+                    cases=cases,
+                    target_plan_id=tid,
+                )
             else:
-                plan = self.compose_plan_light(intent, action_catalog=action_catalog)
+                plan = self.compose_plan_light(
+                    intent,
+                    action_catalog=action_catalog,
+                    target_plan_id=tid,
+                )
 
             return {
                 'success': True,

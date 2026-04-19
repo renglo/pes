@@ -95,6 +95,51 @@ def verification_output_yield_for_user(
     return False
 
 
+def verification_detail_message(
+    handler_output: Any,
+    depth: int = 0,
+    _seen: Optional[Set[int]] = None,
+) -> str:
+    """
+    Best-effort plain text from a verifier/handler failure payload for users and the LLM.
+    """
+    if _seen is None:
+        _seen = set()
+    if depth > 10 or handler_output is None:
+        return ''
+    if isinstance(handler_output, str):
+        return handler_output.strip()
+    if isinstance(handler_output, list):
+        chunks = [
+            verification_detail_message(item, depth + 1, _seen)
+            for item in handler_output
+        ]
+        return ' '.join(c for c in chunks if c).strip()
+    if isinstance(handler_output, dict):
+        oid = id(handler_output)
+        if oid in _seen:
+            return ''
+        _seen.add(oid)
+        try:
+            for key in ('message', 'error'):
+                v = handler_output.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            act = handler_output.get('actionable')
+            if isinstance(act, dict):
+                m = act.get('message')
+                if isinstance(m, str) and m.strip():
+                    return m.strip()
+            inner = handler_output.get('output')
+            if inner is not None and inner is not handler_output:
+                inner_t = verification_detail_message(inner, depth + 1, _seen)
+                if inner_t:
+                    return inner_t
+        finally:
+            _seen.discard(oid)
+    return ''
+
+
 @dataclass
 class RequestContext:
     """Request-scoped context for agent operations."""
@@ -284,6 +329,20 @@ class Specialist:
             # Add the incoming messages
             for msg in message_list:
                 messages.append(msg)
+
+            # After act() fails, no tool message is saved (see act() except). Without this, the LLM
+            # does not see the failure and may still say "successfully added...".
+            if tool_result == 'tool_error':
+                err = getattr(self._get_context(), 'execute_intention_error', '') or ''
+                detail = err.strip() if err else 'No details recorded.'
+                messages.append({
+                    'role': 'system',
+                    'content': (
+                        'IMPORTANT: The last tool run failed.'
+                        'Acknowledge the failure in plain language and suggest what to try next. '
+                        f'Technical detail: {detail}'
+                    ),
+                })
 
             # Initialize approved_tools with default empty list
             approved_tools = []
@@ -525,6 +584,9 @@ class Specialist:
 
                             }
                             self.AGU.mutate_workspace({"action_log": log_entry})
+
+            if tool_result == 'tool_error':
+                self._update_context(execute_intention_error='')
 
             return {
                 'success': True,
@@ -808,6 +870,65 @@ class Specialist:
             return error_result
 
 
+    def verify_preflight(self, action):
+        """Cheap preconditions + verify_precheck only. Non-blocking: never mutates workspace or stops the turn."""
+        verification_handler = None
+        params = {}
+
+        try:
+            verification_tool = None
+            for a in self._get_context().list_actions:
+                if a['key'] == self._get_context().current_action:
+                    if 'verification' not in a:
+                        return
+                    verification_tool = a['verification']
+                    break
+
+            if not verification_tool:
+                return
+
+            for t in self._get_context().list_tools:
+                if t['key'] == verification_tool:
+                    verification_handler = t.get('handler', '')
+
+            parts = verification_handler.split('/')
+
+            if len(parts) != 2:
+                print(f'[Preflight] invalid verification route: {verification_handler!r}')
+                return
+
+            portfolio = self._get_context().portfolio
+            org = self._get_context().org
+
+            params['_portfolio'] = self._get_context().portfolio
+            params['_org'] = self._get_context().org
+            params['_entity_type'] = self._get_context().entity_type
+            params['_entity_id'] = self._get_context().entity_id
+            params['_thread'] = self._get_context().thread
+            params['_verification_preflight'] = True
+
+            continuity = self._get_context().continuity
+            params['plan_id'] = continuity['plan_id']
+            params['plan_step'] = continuity['plan_step']
+
+            workspace = self.AGU.get_active_workspace()
+            params['plan'] = workspace['plan'][continuity['plan_id']]
+            params['state_machine'] = workspace['state_machine'][continuity['plan_id']]
+            params['workspace_cache'] = workspace.get('cache') or {}
+            docs = workspace.get('documents')
+            params['documents'] = docs if isinstance(docs, dict) else {}
+
+            response = self.SHC.handler_call(portfolio, org, parts[0], parts[1], params)
+            out = response.get('output')
+            if isinstance(out, dict) and out.get('preflight'):
+                msg = str(out.get('message') or '')[:160]
+                print(f'[Preflight] {out.get("preflight")} step_objectives_met={out.get("step_objectives_met")} {msg}')
+            else:
+                print(f'[Preflight] handler success={response.get("success")}')
+
+        except Exception as e:
+            print(f'[Preflight] error (non-blocking): {e}')
+
     def verify(self,action):
         function = 'verify'
         verification_handler = None  # Initialize to avoid UnboundLocalError
@@ -853,6 +974,8 @@ class Specialist:
             params['plan'] = workspace['plan'][continuity['plan_id']]
             params['state_machine'] = workspace['state_machine'][continuity['plan_id']]
             params['workspace_cache'] = workspace.get('cache') or {}
+            docs = workspace.get('documents')
+            params['documents'] = docs if isinstance(docs, dict) else {}
 
             response = self.SHC.handler_call(portfolio,org,parts[0],parts[1],params)
 
@@ -885,11 +1008,19 @@ class Specialist:
                     actionable = None
 
                 yield_user = verification_output_yield_for_user(output)
-                msg = (
-                    "Paused for user selection (verifier)."
-                    if yield_user
-                    else "Step has not been completed yet. Continue the loop"
-                )
+                detail = verification_detail_message(output)
+                if yield_user:
+                    msg = (
+                        f"Step verification is waiting on you or external input. {detail}".strip()
+                        if detail
+                        else "Step verification is waiting on you or external input (see action log for details)."
+                    )
+                else:
+                    msg = (
+                        f"Step verification did not pass. {detail}".strip()
+                        if detail
+                        else "Step verification did not pass (see action log for details)."
+                    )
                 continuity = self._get_context().continuity
                 log_entry = {
                             "plan_id":continuity["plan_id"],
@@ -901,6 +1032,7 @@ class Specialist:
                     log_entry["yield_for_user"] = True
                 self.AGU.mutate_workspace({'action_log': log_entry})
                 print(msg)
+                self.AGU.print_chat(msg, 'text')
 
 
             return {"success": response['success'], "action": function, "input": "", "output": response['output']}
@@ -1035,6 +1167,8 @@ class Specialist:
                 loops = loops + 1
                 print(f'Loop iteration {loops}/{loop_limit}')
 
+                if loops == 1:
+                    self.verify_preflight(context.current_action)
 
                 # Step 1: Interpret. We receive the message from the user and we issue a tool command or another message
                 response_1 = self.interpret(tool_result=tool_result)
@@ -1069,15 +1203,17 @@ class Specialist:
 
 
                     if not response_2['success']:
-                        #print('Tool failed, feeding tool output to loop. Agent will try to fix it. Otherwise will exit.')
-                        # Something went wrong during tool execution, Have the agent try to fix it instead of just giving up.
-                        #return {'success':False,'action':action,'output':response_2,'stack':results}
                         tool_result = 'tool_error'
-
-
-
-                        #continue
-
+                        err_txt = verification_detail_message(response_2.get('output'))
+                        if not err_txt and isinstance(response_2.get('output'), str):
+                            err_txt = response_2['output']
+                        fail_msg = (
+                            f"Tool run failed before verification could run. {err_txt}".strip()
+                            if err_txt
+                            else "Tool run failed before verification could run. Check the tool response and try again."
+                        )
+                        self.AGU.print_chat(fail_msg, 'text')
+                        continue
 
                     '''
                     # Tool returned successfully. Run tool custom checks
@@ -1107,12 +1243,31 @@ class Specialist:
 
                     elif verification_output_yield_for_user(response_2c.get('output')):
                         print('Run() >> Verifier requested yield; exiting ReAct loop for user selection.')
-                        self.AGU.print_chat(f'🤖','transient')
-                        output = {'status': 'awaiting'}
+                        vdetail = verification_detail_message(response_2c.get('output'))
+                        pause_msg = (
+                            f"Verification paused this step: {vdetail}".strip()
+                            if vdetail
+                            else "Verification paused this step (waiting on user or external input)."
+                        )
+                        output = {
+                            'status': 'awaiting',
+                            'verification_pause': True,
+                            'message': pause_msg,
+                            'verifier_output': response_2c.get('output'),
+                        }
                         c_id = getattr(self._get_context(), 'tool_response_c_id', None)
                         if c_id:
                             output['next'] = c_id
                         return {'success':True,'action':action,'input':payload, 'output':output ,'stack':results}
+
+                    else:
+                        # Verification failed without yield — surface to the model; loop can retry.
+                        vdetail = verification_detail_message(response_2c.get('output'))
+                        tool_result = (
+                            f"verification_failed: {vdetail}".strip()
+                            if vdetail
+                            else "verification_failed: Step checks did not pass; review verifier output and fix data or retry the right tool."
+                        )
 
                 elif 'tool_calls' not in response_1['output'] or not response_1['output']['tool_calls']:
                     # No Tool needs execution.

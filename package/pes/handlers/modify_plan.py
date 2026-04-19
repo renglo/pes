@@ -23,6 +23,7 @@ from renglo.blueprint.blueprint_controller import BlueprintController
 from contextvars import ContextVar
 
 from pes.handlers.generate_plan import load_prompts_from_package_route
+from pes.handlers import utilities as plan_utilities
 
 
 def _modify_plan_trace(msg: str, payload: Any = None, limit: int = 4000) -> None:
@@ -858,8 +859,9 @@ class ModifyPlan:
             "case_group":"",
             "message":"",  # Human-readable paragraph describing the modifications to make
             "plan": {},    # Existing plan to modify (Plan object with id, steps, meta)
-            "state_machine": {},  # Optional: Execution state machine showing which steps are completed
-            "trip": {}     # Optional: Trip document showing existing reservations
+            "state_machine": {},  # Optional: Execution state; used for in-place reconcile (Option C)
+            "trip": {},    # Optional: Trip document showing existing reservations
+            "_init": {},   # Optional: preserve_plan_id (default true) — false mints a new plan id (old behavior)
         }
         '''
         # Initialize a new request context
@@ -953,6 +955,32 @@ class ModifyPlan:
                     patcher.apply_invalidations_for_modification(base_intent, updated_intent)
                 except ImportError:
                     pass  # inca optional: invalidate holds/bookings when intent changes
+                preserve_plan_id = True
+                if isinstance(context.init, dict) and 'preserve_plan_id' in context.init:
+                    preserve_plan_id = bool(context.init.get('preserve_plan_id'))
+
+                raw_plan = payload.get('plan')
+                existing_plan: Optional[Dict[str, Any]] = None
+                if raw_plan is not None:
+                    existing_plan = (
+                        json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+                    )
+                    if not isinstance(existing_plan, dict):
+                        existing_plan = None
+
+                target_plan_id: Optional[str] = None
+                if preserve_plan_id and existing_plan:
+                    target_plan_id = str(existing_plan.get('id') or '').strip() or None
+
+                raw_sm = payload.get('state_machine')
+                existing_state: Optional[Dict[str, Any]] = None
+                if raw_sm is not None:
+                    existing_state = (
+                        json.loads(raw_sm) if isinstance(raw_sm, str) else raw_sm
+                    )
+                    if not isinstance(existing_state, dict):
+                        existing_state = None
+
                 from pes.handlers.propose_plan import ProposePlan
                 propose_payload = {
                     'portfolio': context.portfolio,
@@ -961,15 +989,48 @@ class ModifyPlan:
                     'intent': updated_intent,
                     '_init': context.init,
                 }
+                if target_plan_id:
+                    propose_payload['target_plan_id'] = target_plan_id
                 if self.prompts and (self.prompts.get('compose_plan') or '').strip():
                     propose_payload['_prompts'] = {'compose_plan': self.prompts['compose_plan']}
                 response = ProposePlan(prompt_route=effective_prompt_route).run(propose_payload)
                 if response.get('success') and response.get('output'):
-                    canonical = {
-                        "plan": response["output"]["plan"],
-                        "intent": updated_intent
+                    plan_dict = response['output']['plan']
+                    if not isinstance(plan_dict, dict):
+                        plan_dict = {}
+                    if target_plan_id:
+                        plan_dict['id'] = target_plan_id
+                        meta = plan_dict.setdefault('meta', {})
+                        if isinstance(meta, dict):
+                            try:
+                                rev = int(meta.get('in_place_revision', 0) or 0) + 1
+                            except (TypeError, ValueError):
+                                rev = 1
+                            meta['in_place_revision'] = rev
+                            meta['in_place_revised_at'] = time.strftime(
+                                '%Y-%m-%dT%H:%M:%SZ', time.gmtime()
+                            )
+
+                    canonical: Dict[str, Any] = {
+                        'plan': plan_dict,
+                        'intent': updated_intent,
                     }
-                    return {'success': True, 'interface': 'plan', 'input': payload, 'output': canonical, 'stack': [response]}
+                    if target_plan_id and existing_plan and isinstance(existing_plan, dict):
+                        base_state = existing_state if isinstance(existing_state, dict) else {}
+                        canonical['state_machine'] = (
+                            plan_utilities.reconcile_plan_state_in_place(
+                                existing_plan,
+                                plan_dict,
+                                base_state,
+                            )
+                        )
+                    return {
+                        'success': True,
+                        'interface': 'plan',
+                        'input': payload,
+                        'output': canonical,
+                        'stack': [response],
+                    }
                 return {'success': False, 'function': function, 'input': payload, 'output': 'ERROR:@modify_plan/run: Could not generate plan from updated intent.'}
             except Exception as e:
                 print(f'Intent-based regeneration failed: {e}')

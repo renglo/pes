@@ -446,7 +446,10 @@ class CommitPlan:
                 output = entry.get('output') or {}
                 plan = output.get('plan')
                 intent = output.get('intent')
-                plan_and_intent = {'plan':plan,'intent':intent}
+                state_machine = output.get('state_machine')
+                plan_and_intent = {'plan': plan, 'intent': intent}
+                if state_machine is not None:
+                    plan_and_intent['state_machine'] = state_machine
                 if plan is not None:
                     print('Plan:', plan)
                     return {'success': True, 'action': action, 'input': '', 'output': plan_and_intent}
@@ -479,7 +482,11 @@ class CommitPlan:
         try:
             pr = f'add_plan_and_intent : {payload}'
             print(pr)
-            saved = self.AGU.mutate_workspace({'plan': payload['plan'],'intent': payload['intent']})
+            changes = {'plan': payload['plan'], 'intent': payload['intent']}
+            sm = payload.get('state_machine')
+            if isinstance(sm, dict) and sm.get('plan_id'):
+                changes['replace_state_machine'] = sm
+            saved = self.AGU.mutate_workspace(changes)
             plan_id = payload['plan']['id']
             
             if saved:
@@ -574,6 +581,9 @@ class CommitPlan:
             if not isinstance(intent_inline, dict):
                 intent_inline = {}
             plan_and_intent = {'plan': plan_inline, 'intent': intent_inline}
+            sm_inline = payload.get('state_machine')
+            if isinstance(sm_inline, dict) and sm_inline.get('plan_id'):
+                plan_and_intent['state_machine'] = sm_inline
         else:
             response_1 = self.find_in_cache()
             results.append(response_1)
