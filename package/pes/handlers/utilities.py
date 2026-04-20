@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import json
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
@@ -46,6 +47,81 @@ def _plan_state_ready(plan_state: Any) -> bool:
 
 
 _TERMINAL_STEP_STATUSES = frozenset({'completed', 'success'})
+
+PLAN_STEP_TERMINAL_STATUSES = frozenset({'completed', 'success', 'complete', 'done'})
+
+
+def step_row_status_is_terminal(status: Any) -> bool:
+    if status is None:
+        return False
+    s = str(status).strip().lower()
+    return s in PLAN_STEP_TERMINAL_STATUSES
+
+
+def is_plan_fully_terminal(workspace: Optional[Dict[str, Any]], plan_id: str) -> bool:
+    if not workspace or not isinstance(workspace, dict) or not str(plan_id).strip():
+        return False
+    pid = str(plan_id).strip()
+    plans = workspace.get('plan') or {}
+    plan = plans.get(pid)
+    if not isinstance(plan, dict):
+        return False
+    sm = workspace.get('state_machine') or {}
+    plan_state = sm.get(pid)
+    if not isinstance(plan_state, dict):
+        return False
+    step_rows = {str(s.get('step_id')): s for s in (plan_state.get('steps') or [])}
+    for ps in plan.get('steps') or []:
+        if not isinstance(ps, dict):
+            continue
+        sid = str(ps.get('step_id', ''))
+        row = step_rows.get(sid)
+        st = (row or {}).get('status')
+        if not step_row_status_is_terminal(st):
+            return False
+    return True
+
+
+def mark_plan_state_machine_closed(agu: AgentUtilities, plan_id: str) -> bool:
+    if not agu or not str(plan_id).strip():
+        return False
+    pid = str(plan_id).strip()
+    ws = agu.get_active_workspace()
+    if not ws or not isinstance(ws, dict):
+        return False
+    if not is_plan_fully_terminal(ws, pid):
+        return False
+    sm = ws.get('state_machine') or {}
+    ps = sm.get(pid)
+    if not isinstance(ps, dict):
+        return False
+    out = deepcopy(ps)
+    out['plan_id'] = out.get('plan_id') or pid
+    out['status'] = 'completed'
+    out['updated_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    agu.mutate_workspace({'replace_state_machine': out})
+    return True
+
+
+def reconcile_terminal_plan_roots(agu: AgentUtilities) -> List[str]:
+    if not agu:
+        return []
+    ws = agu.get_active_workspace()
+    if not ws or not isinstance(ws, dict):
+        return []
+    updated: List[str] = []
+    for pid in list((ws.get('plan') or {}).keys()):
+        pid_s = str(pid).strip()
+        if not pid_s:
+            continue
+        if not is_plan_fully_terminal(ws, pid_s):
+            continue
+        if mark_plan_state_machine_closed(agu, pid_s):
+            updated.append(pid_s)
+        ws = agu.get_active_workspace()
+        if not ws or not isinstance(ws, dict):
+            break
+    return updated
 
 
 def _step_signature_for_reconcile(step: Any) -> Tuple[Any, ...]:
@@ -336,6 +412,34 @@ def action_log_last_nonce_entry(
     return None
 
 
+def user_message_suggests_plan_continue(user_message: Optional[str]) -> bool:
+    """
+    True when the user is asking to resume or advance an existing saved plan.
+
+    Used with ``find_pending_plan_step``: only then do we synthesize a c_id for the
+    next ``pending`` step (avoid jumping plan execution on unrelated chit-chat).
+    """
+    if not user_message or not str(user_message).strip():
+        return False
+    m = user_message.lower()
+    hints = (
+        'continue with the plan',
+        'continue the plan',
+        'resume the plan',
+        'pick up the plan',
+        'keep going with the plan',
+        'proceed with the plan',
+        'go ahead with the plan',
+        'next step of the plan',
+        'run the next step',
+        'finish the plan',
+        'complete the plan',
+        'execute the plan',
+        'follow the plan',
+    )
+    return any(h in m for h in hints)
+
+
 def user_message_suggests_fresh_search(user_message: Optional[str]) -> bool:
     if not user_message or not str(user_message).strip():
         return False
@@ -392,6 +496,69 @@ def find_suspended_plan_step(
     return plan_id, sid, step
 
 
+def find_pending_plan_step(
+    workspace: Dict[str, Any],
+) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    """
+    First step in plan order that is still ``pending`` in the state machine and whose
+    ``depends_on`` steps are terminal (``completed`` / ``success``).
+
+    Used when there is no awaiting/failed/running step — e.g. user says \"continue\"
+    after prior steps finished but the executor never started the next one.
+    """
+    plans = workspace.get('plan') or {}
+    sm = workspace.get('state_machine') or {}
+    terminal = frozenset({'completed', 'success'})
+    per_plan: List[Tuple[str, str, Dict[str, Any]]] = []
+    for plan_id, plan_doc in plans.items():
+        if not isinstance(plan_doc, dict):
+            continue
+        plan_state = sm.get(plan_id)
+        if not isinstance(plan_state, dict):
+            continue
+        steps = plan_doc.get('steps') or []
+        step_states_by_id = {
+            str(s.get('step_id')): s for s in (plan_state.get('steps') or [])
+        }
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            sid = str(step.get('step_id', ''))
+            row = step_states_by_id.get(sid)
+            if not row or row.get('status') != 'pending':
+                continue
+            deps = step.get('depends_on') or []
+            deps_ok = True
+            for d in deps:
+                dep_status = (step_states_by_id.get(str(d)) or {}).get('status')
+                if dep_status not in terminal:
+                    deps_ok = False
+                    break
+            if deps_ok:
+                per_plan.append((plan_id, sid, row))
+                break
+    if not per_plan:
+        return None
+    return max(per_plan, key=lambda t: _plan_recency_tuple(workspace, t[0]))
+
+
+def find_resume_target_step(
+    workspace: Dict[str, Any],
+    user_message: Optional[str] = None,
+) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    """
+    Prefer a suspended step (awaiting / failed / running); otherwise the first
+    dependency-ready ``pending`` step when the user message indicates they want to
+    continue the plan (see ``user_message_suggests_plan_continue``).
+    """
+    suspended = find_suspended_plan_step(workspace)
+    if suspended:
+        return suspended
+    if user_message_suggests_plan_continue(user_message):
+        return find_pending_plan_step(workspace)
+    return None
+
+
 def infer_continuity_id(
     user_message: Optional[str],
     *,
@@ -402,6 +569,9 @@ def infer_continuity_id(
     Build a continuity id when the client omits ``next``.
 
     If ``get_workspace`` is omitted, uses ``agu.get_active_workspace()``.
+
+    Resumes suspended steps (awaiting/failed/running) or, if none, starts the next
+    ``pending`` step whose dependencies are completed.
     """
     if not agu:
         return None
@@ -417,10 +587,12 @@ def infer_continuity_id(
     if not (workspace.get('plan') or {}):
         return None
 
-    found = find_suspended_plan_step(workspace)
+    found = find_resume_target_step(workspace, user_message)
     if not found:
         return None
     plan_id, plan_step, step = found
+    if is_plan_fully_terminal(workspace, plan_id):
+        return None
 
     if user_message_suggests_fresh_search(user_message):
         return f'irn:c_id:{plan_id}:{plan_step}:'
@@ -536,6 +708,22 @@ def continuity_router(
                 'success': True,
                 'input': c_id,
                 'output': {'next_action': 'c_id_error', 'message': pr},
+            }
+
+        if is_plan_fully_terminal(workspace, plan_id):
+            pr = (
+                'This plan is already fully executed; continuity for this plan is closed. '
+                'Return control to triage or start a new request.'
+            )
+            agu.print_chat(pr, 'transient')
+            return {
+                'success': True,
+                'input': c_id,
+                'output': {
+                    'next_action': 'plan_execution_complete',
+                    'plan_id': plan_id,
+                    'message': pr,
+                },
             }
 
         if update_plan_context:

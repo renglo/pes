@@ -140,6 +140,66 @@ def verification_detail_message(
     return ''
 
 
+def _extract_actionable_nested(
+    obj: Any,
+    _seen: Optional[Set[int]] = None,
+) -> Optional[Dict[str, Any]]:
+    """First actionable dict found in a verifier / handler output tree."""
+    if _seen is None:
+        _seen = set()
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        oid = id(obj)
+        if oid in _seen:
+            return None
+        _seen.add(oid)
+        try:
+            act = obj.get('actionable')
+            if isinstance(act, dict):
+                return act
+            for v in obj.values():
+                found = _extract_actionable_nested(v, _seen)
+                if found is not None:
+                    return found
+        finally:
+            _seen.discard(oid)
+        return None
+    if isinstance(obj, list):
+        for item in obj:
+            found = _extract_actionable_nested(item, _seen)
+            if found is not None:
+                return found
+    return None
+
+
+def verification_failure_guidance_for_model(handler_output: Any) -> str:
+    """
+    Text for the specialist LLM after verify() fails: message, failure_type, suggestion.
+    """
+    detail = verification_detail_message(handler_output)
+    actionable = _extract_actionable_nested(handler_output)
+    parts: List[str] = []
+    if detail:
+        parts.append(f'Verifier message: {detail}')
+    if isinstance(actionable, dict):
+        ft = actionable.get('failure_type')
+        if isinstance(ft, str) and ft.strip():
+            parts.append(f'Failure type: {ft.strip()}')
+        sug = actionable.get('suggestion')
+        if isinstance(sug, str) and sug.strip():
+            parts.append(f'Suggested next step: {sug.strip()}')
+    if parts:
+        return '\n'.join(parts)
+    return detail or (
+        'Step verification did not pass; review the action log and verifier output.'
+    )
+
+
+# Max verify failures (after successful tool runs) before exiting the ReAct loop with status awaiting.
+VERIFICATION_FAILURE_LIMIT = 3
+
+
 @dataclass
 class RequestContext:
     """Request-scoped context for agent operations."""
@@ -167,6 +227,7 @@ class RequestContext:
     continuity: Dict[str, Any] = field(default_factory=dict)
     message: str = ''
     tool_response_c_id: str = ''
+    last_verification_output: Optional[Any] = None
 
 # Create a context variable to store the request context
 request_context: ContextVar[RequestContext] = ContextVar('request_context', default=RequestContext())
@@ -341,6 +402,21 @@ class Specialist:
                         'IMPORTANT: The last tool run failed.'
                         'Acknowledge the failure in plain language and suggest what to try next. '
                         f'Technical detail: {detail}'
+                    ),
+                })
+
+            if isinstance(tool_result, str) and tool_result.startswith('verification_failed'):
+                vout = getattr(self._get_context(), 'last_verification_output', None)
+                guidance = verification_failure_guidance_for_model(vout) if vout else tool_result
+                messages.append({
+                    'role': 'system',
+                    'content': (
+                        'IMPORTANT: The last tool run succeeded, but step verification did NOT pass. '
+                        'Do not tell the user this plan step is complete. '
+                        'If the trip already shows the correct booking, say that verification disagreed with the plan '
+                        'and the user may need to continue manually or wait for a fix. '
+                        'If the same failure repeats after you corrected data, treat it as a possible platform bug.\n\n'
+                        f'{guidance}'
                     ),
                 })
 
@@ -870,8 +946,14 @@ class Specialist:
             return error_result
 
 
-    def verify_preflight(self, action):
-        """Cheap preconditions + verify_precheck only. Non-blocking: never mutates workspace or stops the turn."""
+    def verify_preflight(self, action) -> Optional[Dict[str, Any]]:
+        """
+        Preconditions + verify_precheck + trip-document check (no action-log audit).
+
+        Returns the verifier ``output`` dict when present (includes ``preflight`` and
+        ``step_objectives_met``). The specialist uses ``step_objectives_met`` to close
+        a step when the trip already satisfies the plan (e.g. post-tool verify bug).
+        """
         verification_handler = None
         params = {}
 
@@ -880,12 +962,12 @@ class Specialist:
             for a in self._get_context().list_actions:
                 if a['key'] == self._get_context().current_action:
                     if 'verification' not in a:
-                        return
+                        return None
                     verification_tool = a['verification']
                     break
 
             if not verification_tool:
-                return
+                return None
 
             for t in self._get_context().list_tools:
                 if t['key'] == verification_tool:
@@ -895,7 +977,7 @@ class Specialist:
 
             if len(parts) != 2:
                 print(f'[Preflight] invalid verification route: {verification_handler!r}')
-                return
+                return None
 
             portfolio = self._get_context().portfolio
             org = self._get_context().org
@@ -920,14 +1002,19 @@ class Specialist:
 
             response = self.SHC.handler_call(portfolio, org, parts[0], parts[1], params)
             out = response.get('output')
+            if isinstance(out, list) and out:
+                inner = out[0]
+                out = inner if isinstance(inner, dict) else None
             if isinstance(out, dict) and out.get('preflight'):
                 msg = str(out.get('message') or '')[:160]
                 print(f'[Preflight] {out.get("preflight")} step_objectives_met={out.get("step_objectives_met")} {msg}')
-            else:
-                print(f'[Preflight] handler success={response.get("success")}')
+                return out
+            print(f'[Preflight] handler success={response.get("success")}')
+            return None
 
         except Exception as e:
             print(f'[Preflight] error (non-blocking): {e}')
+            return None
 
     def verify(self,action):
         function = 'verify'
@@ -980,6 +1067,7 @@ class Specialist:
             response = self.SHC.handler_call(portfolio,org,parts[0],parts[1],params)
 
             if response['success']:
+                self._update_context(last_verification_output=None)
                 msg = f"Verification OK. Step Completed."
                 tool_step = '5'
                 continuity = self._get_context().continuity
@@ -996,6 +1084,7 @@ class Specialist:
 
             else:
                 output = response.get('output')
+                self._update_context(last_verification_output=output)
                 if isinstance(output, dict):
                     actionable = output.get('actionable')
                 elif isinstance(output, list):
@@ -1148,6 +1237,7 @@ class Specialist:
 
             # Set the initial context for this turn
             self._set_context(context)
+            self._update_context(last_verification_output=None)
 
             results = []
 
@@ -1163,12 +1253,34 @@ class Specialist:
             loop_limit = 6
             tool_result = ''
             verification_result = ''
+            verification_fail_streak = 0
             while loops < loop_limit:
                 loops = loops + 1
                 print(f'Loop iteration {loops}/{loop_limit}')
 
                 if loops == 1:
-                    self.verify_preflight(context.current_action)
+                    preflight_out = self.verify_preflight(context.current_action)
+                    if isinstance(preflight_out, dict) and preflight_out.get('step_objectives_met'):
+                        msg = (
+                            'Step objectives already met (preflight trip check). '
+                            'Closing step without duplicate tool runs.'
+                        )
+                        self.AGU.print_chat(msg, 'transient')
+                        log_entry = {
+                            'plan_id': context.continuity['plan_id'],
+                            'plan_step': context.continuity['plan_step'],
+                            'status': '5',
+                            'message': msg,
+                            'type': 'preflight_objectives_met',
+                        }
+                        self.AGU.mutate_workspace({'action_log': log_entry})
+                        return {
+                            'success': True,
+                            'action': action,
+                            'input': payload,
+                            'output': {'status': 'completed'},
+                            'stack': results,
+                        }
 
                 # Step 1: Interpret. We receive the message from the user and we issue a tool command or another message
                 response_1 = self.interpret(tool_result=tool_result)
@@ -1242,6 +1354,7 @@ class Specialist:
                         self.AGU.mutate_workspace({'action_log': log_entry})
 
                     elif verification_output_yield_for_user(response_2c.get('output')):
+                        verification_fail_streak = 0
                         print('Run() >> Verifier requested yield; exiting ReAct loop for user selection.')
                         vdetail = verification_detail_message(response_2c.get('output'))
                         pause_msg = (
@@ -1262,7 +1375,42 @@ class Specialist:
 
                     else:
                         # Verification failed without yield — surface to the model; loop can retry.
+                        verification_fail_streak += 1
                         vdetail = verification_detail_message(response_2c.get('output'))
+                        full_guidance = verification_failure_guidance_for_model(
+                            response_2c.get('output')
+                        )
+                        if verification_fail_streak >= VERIFICATION_FAILURE_LIMIT:
+                            stuck_msg = (
+                                f"Automatic step verification failed {verification_fail_streak} times in a row "
+                                f"(after tool runs). The booking data on the trip may still be correct.\n\n"
+                                f"{full_guidance}\n\n"
+                                "If you already added the right hotel or flight, tell the user verification kept failing "
+                                "and they may need to continue outside this assistant or report the issue. "
+                                "Do not keep retrying the same tools unless something actually changed."
+                            )
+                            print(
+                                f'Run() >> Verification failure limit ({VERIFICATION_FAILURE_LIMIT}); '
+                                'exiting ReAct loop with awaiting status.'
+                            )
+                            self.AGU.print_chat(stuck_msg, 'text')
+                            output = {
+                                'status': 'awaiting',
+                                'verification_stuck': True,
+                                'verification_failures': verification_fail_streak,
+                                'message': stuck_msg,
+                                'verifier_output': response_2c.get('output'),
+                            }
+                            c_id = getattr(self._get_context(), 'tool_response_c_id', None)
+                            if c_id:
+                                output['next'] = c_id
+                            return {
+                                'success': True,
+                                'action': action,
+                                'input': payload,
+                                'output': output,
+                                'stack': results,
+                            }
                         tool_result = (
                             f"verification_failed: {vdetail}".strip()
                             if vdetail
@@ -1298,8 +1446,20 @@ class Specialist:
 
             # If we reach here, we hit the loop limit
             print(f'Warning: Reached maximum loop limit ({loop_limit})')
-            self.AGU.print_chat(f'🤖⚠️  Can you re-formulate your request please?','text')
-            return {'success':True,'action':action,'input':payload,'output':response_3['output'],'stack':results}
+            lim_msg = (
+                f'This plan step stopped after {loop_limit} attempts without completing verification. '
+                'Tell the user the step may be stuck, what was last tried, and that they can rephrase or continue manually.'
+            )
+            self.AGU.print_chat(lim_msg, 'text')
+            raw_out = response_3.get('output')
+            output: Dict[str, Any] = dict(raw_out) if isinstance(raw_out, dict) else {'assistant_output': raw_out}
+            output['status'] = 'awaiting'
+            output['loop_limit_reached'] = True
+            output['message'] = lim_msg
+            c_id = getattr(self._get_context(), 'tool_response_c_id', None)
+            if c_id:
+                output['next'] = c_id
+            return {'success': True, 'action': action, 'input': payload, 'output': output, 'stack': results}
 
 
         except Exception as e:

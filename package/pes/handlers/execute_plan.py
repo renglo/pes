@@ -13,6 +13,14 @@ class DecimalEncoder(json.JSONEncoder):
         return super(DecimalEncoder, self).default(obj)
 
 
+_STEP_TERMINAL_SKIP = frozenset({'completed', 'success', 'complete', 'done'})
+
+
+def _execute_plan_step_status_done(raw: Any) -> bool:
+    s = str(raw or '').strip().lower()
+    return s in _STEP_TERMINAL_SKIP
+
+
 class ExecutePlan:
     """
     Executes a plan where each step goes through:
@@ -403,9 +411,7 @@ class ExecutePlan:
                 
                 # Check if the step has a status that needs to be skipped
                 step_state = step_states_by_id[step_id]
-                if step_state["status"] in (
-                    "completed"
-                ):
+                if _execute_plan_step_status_done(step_state.get('status')):
                     print(f'Skipping step. Status:{step_state["status"]}')
                     continue
                  
