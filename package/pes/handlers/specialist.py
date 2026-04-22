@@ -192,7 +192,7 @@ def verification_failure_guidance_for_model(handler_output: Any) -> str:
     if parts:
         return '\n'.join(parts)
     return detail or (
-        'Step verification did not pass; review the action log and verifier output.'
+        'Work in progress; review the action log and verifier output.'
     )
 
 
@@ -1106,9 +1106,9 @@ class Specialist:
                     )
                 else:
                     msg = (
-                        f"Step verification did not pass. {detail}".strip()
+                        f"Work in progress. {detail}".strip()
                         if detail
-                        else "Step verification did not pass (see action log for details)."
+                        else "Work in progress (see action log for details)."
                     )
                 continuity = self._get_context().continuity
                 log_entry = {
@@ -1326,7 +1326,7 @@ class Specialist:
                         )
                         self.AGU.print_chat(fail_msg, 'text')
                         continue
-
+                    
                     '''
                     # Tool returned successfully. Run tool custom checks
                     response_2b = self.check(response_2['output'])
@@ -1334,6 +1334,9 @@ class Specialist:
                     if not response_2b['success']:
                         tool_result = 'tool_error'
                     '''
+                    
+                    
+                
 
 
                     # Run verification script to figure out if action is done
