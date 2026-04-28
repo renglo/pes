@@ -312,7 +312,7 @@ class Specialist:
             message_filter = {'param':'_next','begins_with':f'irn:c_id:{continuity["plan_id"]}:{continuity["plan_step"]}'}
             message_list = self.AGU.get_message_history(filter=message_filter)
 
-            print(f'Specialist Message History: {message_list}')
+            #print(f'Specialist Message History: {message_list}')
 
             #If the message_list comes back empty, that means the specialist execution is new. Create into message
             if not message_list['output']:
