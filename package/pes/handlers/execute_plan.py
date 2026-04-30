@@ -37,11 +37,16 @@ class ExecutePlan:
     def __init__(
         self,
         agu,
+        executor_tool_settings: Optional[Dict[str, Any]] = None,
     ):
         """
         :agu: Agent Utilities
+        :executor_tool_settings: Optional dict merged into each tool handler's ``_init``
+            for this execution (overrides tool-registry ``init`` JSON). Set by the caller
+            agent (e.g. quote vs trip) so the same tools can behave differently per agent.
         """
         self.AGU = agu
+        self.executor_tool_settings = dict(executor_tool_settings or {})
 
     # ---------- Internal helpers ----------
 
@@ -490,6 +495,9 @@ class ExecutePlan:
 
                     # Send continuity variables to the specialist
                     specialist_payload["continuity"] = continuity
+                    specialist_payload["executor_tool_settings"] = dict(
+                        self.executor_tool_settings
+                    )
 
                     result = self._call_specialist(specialist_payload)
                     specialist_output = result

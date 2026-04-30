@@ -228,6 +228,8 @@ class RequestContext:
     message: str = ''
     tool_response_c_id: str = ''
     last_verification_output: Optional[Any] = None
+    # Merged into handler ``_init`` for plan-step tool runs (see ExecutePlan / executor_tool_settings).
+    executor_tool_settings: Dict[str, Any] = field(default_factory=dict)
 
 # Create a context variable to store the request context
 request_context: ContextVar[RequestContext] = ContextVar('request_context', default=RequestContext())
@@ -739,6 +741,10 @@ class Specialist:
             if not isinstance(list_inits[tool_name], str) and isinstance(list_inits[tool_name], dict):
                 handler_init = list_inits[tool_name]
 
+            merged_init = dict(handler_init)
+            exec_over = self._get_context().executor_tool_settings
+            if isinstance(exec_over, dict) and exec_over:
+                merged_init = {**merged_init, **exec_over}
 
             # Check if handler has the right format (2 parts: tool/handler, or 3 parts: tool/handler/subhandler)
             handler_route = list_handlers[tool_name]
@@ -761,7 +767,7 @@ class Specialist:
             params['_entity_type'] = self._get_context().entity_type
             params['_entity_id'] = self._get_context().entity_id
             params['_thread'] = self._get_context().thread
-            params['_init'] = handler_init
+            params['_init'] = merged_init
 
             print(f'Calling {handler_route} ')
 
@@ -1234,6 +1240,8 @@ class Specialist:
             context.current_action = payload.get('action', '')
             context.continuity = payload.get('continuity',{}) # plan_id, plan_step, action_step, tool_id
 
+            ets = payload.get('executor_tool_settings')
+            context.executor_tool_settings = ets if isinstance(ets, dict) else {}
 
             # Set the initial context for this turn
             self._set_context(context)

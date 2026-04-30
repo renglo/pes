@@ -873,6 +873,7 @@ def run_plan_action_tool(
     *,
     agu: AgentUtilities,
     execute_plan_cls: type = ExecutePlan,
+    executor_tool_settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     function = inspect.currentframe().f_code.co_name
     print('Running:', function)
@@ -883,7 +884,7 @@ def run_plan_action_tool(
         'tool_step': tool_step,
     }
     try:
-        executor = execute_plan_cls(agu)
+        executor = execute_plan_cls(agu, executor_tool_settings=executor_tool_settings)
         execution_result = executor.run(payload)
         if not execution_result['success']:
             return {
@@ -916,22 +917,25 @@ def execute_plan(
     execute_plan_cls: type = ExecutePlan,
     log_style: str = 'transient',
     log_label: str = 'execute_plan',
+    executor_tool_settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     pr = f'Calling the executor for plan:{plan_id}, plan_step:{plan_step}, action_step:{action_step}, tool_step:{tool_step}'
     if log_style and log_style != 'none':
         agu.print_chat(pr, log_style)
 
+    rpat_kw = {
+        'agu': agu,
+        'execute_plan_cls': execute_plan_cls,
+        'executor_tool_settings': executor_tool_settings,
+    }
+
     if next_action == 'initiate_plan':
-        response = run_plan_action_tool(
-            plan_id, 0, 0, 0, agu=agu, execute_plan_cls=execute_plan_cls
-        )
+        response = run_plan_action_tool(plan_id, 0, 0, 0, **rpat_kw)
     elif next_action == 'initiate_action':
-        response = run_plan_action_tool(
-            plan_id, plan_step, 0, 0, agu=agu, execute_plan_cls=execute_plan_cls
-        )
+        response = run_plan_action_tool(plan_id, plan_step, 0, 0, **rpat_kw)
     elif next_action == 'initiate_tool':
         response = run_plan_action_tool(
-            plan_id, plan_step, action_step, 0, agu=agu, execute_plan_cls=execute_plan_cls
+            plan_id, plan_step, action_step, 0, **rpat_kw
         )
     elif next_action == 'resume_tool':
         response = run_plan_action_tool(
@@ -939,8 +943,7 @@ def execute_plan(
             plan_step,
             action_step,
             tool_step,
-            agu=agu,
-            execute_plan_cls=execute_plan_cls,
+            **rpat_kw,
         )
     else:
         return {
