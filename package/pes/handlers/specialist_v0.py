@@ -3,6 +3,7 @@ from renglo.data.data_controller import DataController
 from renglo.schd.schd_controller import SchdController
 from renglo.common import load_config
 
+from openai import OpenAI
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Set, Tuple
 from contextvars import ContextVar
@@ -560,6 +561,9 @@ class Specialist:
         }
 
         return consent
+
+
+
 
     def interpret(self,no_tools=False,tool_result=False):
 

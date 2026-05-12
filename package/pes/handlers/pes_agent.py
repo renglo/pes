@@ -313,7 +313,7 @@ class PesAgent:
                 'connectionId': str, optional  # WebSocket connection ID
                 'workspace': str, optional     # Workspace ID
                 'next': str, optional          # Continuity ID (c_id) for resuming execution
-                'planner_intent': str, optional  # e.g. 'modify' / 'modify_plan' when omitting next
+                'planner_intent': str, optional  # e.g. 'modify' / 'modify_intent' when omitting next
                 'planner_mode': str, optional    # alias for planner_intent
             }
 
@@ -484,13 +484,41 @@ class PesAgent:
             self._set_context(context)
 
             skip_continuity_router = False
-            if not context.next:
+            if context.next:
+                modify_early = plan_utilities.plan_modify_resolution_if_applicable(
+                    self.AGU.get_active_workspace(),
+                    context.message,
+                    payload,
+                    config=self.config,
+                )
+                if (
+                    modify_early
+                    and modify_early.mode == 'modify_intent'
+                    and modify_early.plan
+                    and modify_early.plan_state
+                ):
+                    skip_continuity_router = True
+                    context.next = None
+                    self._update_context(
+                        plan=modify_early.plan,
+                        state_machine=modify_early.plan_state,
+                        next=None,
+                    )
+                    self._set_context(context)
+                    self.AGU.print_chat(
+                        'Trip requirement change detected: switching to plan modification '
+                        f'(plan_id={modify_early.plan_id}); stale continuity id cleared.',
+                        'transient',
+                    )
+
+            if not skip_continuity_router and not context.next:
                 resolution = plan_utilities.resolve_no_next_continuity(
                     context.message,
                     agu=self.AGU,
                     payload=payload,
+                    config=self.config,
                 )
-                if resolution.mode == 'modify_plan' and resolution.plan and resolution.plan_state:
+                if resolution.mode == 'modify_intent' and resolution.plan and resolution.plan_state:
                     skip_continuity_router = True
                     self._update_context(
                         plan=resolution.plan,

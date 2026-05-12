@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass
@@ -18,9 +19,10 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 from renglo.agent.agent_utilities import AgentUtilities
 
 from pes.handlers.execute_plan import ExecutePlan
+from pes.handlers.plan_modify_classifier import classify_user_requests_plan_modify
 
 
-ContinuityMode = Literal['resume', 'modify_plan', 'none']
+ContinuityMode = Literal['resume', 'modify_intent', 'none']
 
 
 @dataclass
@@ -28,7 +30,7 @@ class NoNextContinuityResolution:
     """
     Result when the client omits ``next`` (no explicit c_id).
 
-    * ``modify_plan`` — user asked to edit an existing saved plan; do not synthesize
+    * ``modify_intent`` — user asked to edit an existing saved plan; do not synthesize
       a c_id or run ``continuity_router`` for execution resume; load plan into context
       and use the modifying-plan action.
     * ``resume`` — synthesize ``c_id`` and run the normal resume path.
@@ -40,6 +42,8 @@ class NoNextContinuityResolution:
     plan_id: Optional[str] = None
     plan: Optional[Dict[str, Any]] = None
     plan_state: Optional[Dict[str, Any]] = None
+    # Set when mode is ``modify_intent`` — why we treated the user message as a plan edit.
+    plan_modify_signal_explanation: Optional[str] = None
 
 
 def _plan_state_ready(plan_state: Any) -> bool:
@@ -296,35 +300,14 @@ def active_plan_bundle(
     return best[0], best[1], best[2]
 
 
-def _normalize_planner_intent(payload: Optional[Dict[str, Any]]) -> Optional[str]:
-    if not payload:
-        return None
-    v = payload.get('planner_intent') or payload.get('planner_mode')
-    if v is None:
-        return None
-    s = str(v).strip().lower().replace('-', '_')
-    if s in ('modify', 'modify_plan', 'modifying_plan', 'change_plan'):
-        return 'modify'
-    return None
-
-
-def user_message_requests_plan_modify(
-    user_message: Optional[str],
-    payload: Optional[Dict[str, Any]] = None,
-) -> bool:
+def _heuristic_plan_modify_substrings(m: str) -> bool:
     """
-    Whether the turn should use the formal \"modify saved plan\" path (no resume c_id).
+    Conservative, domain-neutral substrings: True only when wording clearly targets
+    editing or replacing the *saved plan* (steps, workflow, or top-level plan scope),
+    not routine continuation of the current step.
 
-    Optional payload keys: ``planner_intent`` or ``planner_mode`` set to
-    ``modify`` / ``modify_plan`` / ``modifying_plan`` / ``change_plan``.
+    PES is industry-agnostic — no travel- or market-specific phrases belong here.
     """
-    if _normalize_planner_intent(payload) == 'modify':
-        return True
-    if not user_message or not str(user_message).strip():
-        return False
-    m = user_message.lower()
-    if "don't change the plan" in m or 'do not change the plan' in m:
-        return False
     hints = (
         'modify the plan',
         'change the plan',
@@ -334,20 +317,173 @@ def user_message_requests_plan_modify(
         'edit the plan',
         'adjust the plan',
         'alter the plan',
-        'change the itinerary',
-        'modify my itinerary',
-        'update my itinerary',
-        'change my trip',
-        'modify my trip',
         'add a step',
         'remove a step',
-        'add another destination',
-        'remove a destination',
-        'different route',
+        'reorder the steps',
+        'reorder steps',
+        'skip a step',
+        'replace a step',
+        'insert a step',
         'scratch the plan',
+        'abandon the plan',
+        'redo the plan',
+        'replan',
+        're-plan',
+        'rewrite the plan',
+        'replace the plan',
+        'different plan',
         'start a different plan',
+        'new plan instead',
+        'change the scope',
+        'narrow the scope',
+        'expand the scope',
+        'change requirements for the plan',
+        'new requirements for the plan',
     )
-    return any(h in m for h in hints)
+    if any(h in m for h in hints):
+        return True
+    # Plan-level schedule/timeline shifts (generic — not tied to any one domain).
+    timeline = (
+        'change the timeline',
+        'different timeline',
+        'move the deadline',
+        'extend the deadline',
+        'change the deadline',
+        'postpone the plan',
+        'defer the plan',
+        'reschedule the plan',
+    )
+    return any(h in m for h in timeline)
+
+
+def _normalize_planner_intent(payload: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not payload:
+        return None
+    v = payload.get('planner_intent') or payload.get('planner_mode')
+    if v is None:
+        return None
+    s = str(v).strip().lower().replace('-', '_')
+    if s in ('modify', 'modify_intent', 'modifying_plan', 'change_plan'):
+        return 'modify'
+    return None
+
+
+def _evaluate_plan_modify_signal(
+    user_message: Optional[str],
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    config: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str]:
+    if _normalize_planner_intent(payload) == 'modify':
+        return True, (
+            "Payload declares planner intent to change the saved plan "
+            "(planner_intent / planner_mode)."
+        )
+    if not user_message or not str(user_message).strip():
+        return False, 'No user text to classify for plan changes.'
+    m = user_message.strip().lower()
+    if "don't change the plan" in m or 'do not change the plan' in m:
+        return False, 'User asked explicitly not to change the plan.'
+    if _heuristic_plan_modify_substrings(m):
+        return (
+            True,
+            'Matched conservative plan-change phrases (explicit intent to edit the saved plan).',
+        )
+    llm = classify_user_requests_plan_modify(
+        str(user_message).strip(),
+        config=config,
+    )
+    if llm is True:
+        return True, (
+            'Classifier reports a clear request to revise or replace the persisted plan '
+            '(structure, steps, scope, or plan-level constraints).'
+        )
+    if llm is False:
+        return False, (
+            'Classifier: message is not a clear plan-change request; keeping current plan.'
+        )
+    return (
+        False,
+        'Classifier unavailable or inconclusive; default is to keep the current plan.',
+    )
+
+
+def explain_plan_modify_decision(
+    user_message: Optional[str],
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    config: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str]:
+    """
+    Human-readable reason for routing (or not) into the formal ``modify_intent`` side path.
+
+    Used by callers (e.g. ``agent_quotes``) when logging why a yes/no gate was shown.
+    Mirrors :func:`user_message_requests_plan_modify` logic.
+    """
+    return _evaluate_plan_modify_signal(user_message, payload, config=config)
+
+
+def user_message_requests_plan_modify(
+    user_message: Optional[str],
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    config: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    Whether this turn should use the formal "modify saved plan" path (no resume c_id).
+
+    **Default is to keep the current plan** unless the caller explicitly flags modification in
+    ``payload`` (``planner_intent`` / ``planner_mode``), a conservative phrase list matches
+    clear edit intent, or the optional LLM classifier returns a confident True.
+
+    When heuristics miss, an optional LLM classifier may run (``plan_modify_classifier``).
+    If the classifier is disabled or inconclusive, the result stays False (no reroute).
+    """
+    decides, _ = _evaluate_plan_modify_signal(user_message, payload, config=config)
+    return decides
+
+
+def plan_modify_resolution_if_applicable(
+    workspace: Optional[Dict[str, Any]],
+    user_message: Optional[str],
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[NoNextContinuityResolution]:
+    """
+    If a saved plan exists and the user message asks to change requirements or the plan,
+    return a ``modify_intent`` resolution for the active plan bundle.
+
+    Used both when ``next`` is omitted (see ``resolve_no_next_continuity``) and when a
+    stale consent / resume ``next`` must be overridden (caller clears ``next``).
+    """
+    if not workspace or not isinstance(workspace, dict):
+        return None
+    if not (workspace.get('plan') or {}):
+        return None
+    local_probe, _ = classify_local_reply_against_pending_execution(
+        workspace, user_message
+    )
+    if local_probe in ('match', 'ambiguous'):
+        return None
+    bundle = active_plan_bundle(workspace)
+    if not bundle:
+        return None
+    if _execution_step_preempts_plan_modify(workspace, user_message):
+        return None
+    decides, rationale = _evaluate_plan_modify_signal(
+        user_message, payload, config=config
+    )
+    if not decides:
+        return None
+    plan_id, plan_doc, plan_state = bundle
+    return NoNextContinuityResolution(
+        mode='modify_intent',
+        plan_id=plan_id,
+        plan=plan_doc,
+        plan_state=plan_state,
+        plan_modify_signal_explanation=rationale,
+    )
 
 
 def resolve_no_next_continuity(
@@ -356,11 +492,15 @@ def resolve_no_next_continuity(
     agu: AgentUtilities,
     payload: Optional[Dict[str, Any]] = None,
     get_workspace: Optional[Callable[[], Any]] = None,
+    config: Optional[Dict[str, Any]] = None,
 ) -> NoNextContinuityResolution:
     """
     When ``next`` was not sent, decide: resume execution (c_id), modify plan, or neither.
 
-    Modify wins over resume when intent matches and a ready plan bundle exists.
+    When a step is ``awaiting`` with a nonce-bearing action-log entry for the current tool,
+    we infer ``resume`` first (any natural-language continuation, not only short ``ok``),
+    so picker-style lines are not mis-routed to ``modify_intent``. Short affirm/deny still
+    use the dedicated consent path when applicable.
     """
     if not agu:
         return NoNextContinuityResolution(mode='none')
@@ -376,15 +516,31 @@ def resolve_no_next_continuity(
     if not (workspace.get('plan') or {}):
         return NoNextContinuityResolution(mode='none')
 
-    bundle = active_plan_bundle(workspace)
-    if bundle and user_message_requests_plan_modify(user_message, payload):
-        plan_id, plan_doc, plan_state = bundle
-        return NoNextContinuityResolution(
-            mode='modify_plan',
-            plan_id=plan_id,
-            plan=plan_doc,
-            plan_state=plan_state,
-        )
+    suspended = find_suspended_plan_step(workspace)
+    if suspended:
+        _plan_id_s, _step_id_s, step_row = suspended
+        if _execution_step_preempts_plan_modify(workspace, user_message):
+            c_id_resume = infer_continuity_id(
+                user_message, agu=agu, get_workspace=lambda: workspace
+            )
+            if c_id_resume:
+                return NoNextContinuityResolution(mode='resume', c_id=c_id_resume)
+        if (
+            isinstance(step_row, dict)
+            and _step_row_awaits_tool_consent(step_row)
+            and user_message_looks_like_tool_consent_reply(user_message)
+        ):
+            c_id_consent = infer_continuity_id(
+                user_message, agu=agu, get_workspace=lambda: workspace
+            )
+            if c_id_consent:
+                return NoNextContinuityResolution(mode='resume', c_id=c_id_consent)
+
+    modify_res = plan_modify_resolution_if_applicable(
+        workspace, user_message, payload, config=config
+    )
+    if modify_res:
+        return modify_res
 
     c_id = infer_continuity_id(
         user_message, agu=agu, get_workspace=lambda: workspace
@@ -410,6 +566,145 @@ def action_log_last_nonce_entry(
         if entry.get('nonce') is not None:
             return entry
     return None
+
+
+def _step_row_awaits_tool_consent(step_row: Dict[str, Any]) -> bool:
+    """True when the specialist is waiting on binary tool consent (WAITING_HUMAN / status 3)."""
+    if not isinstance(step_row, dict):
+        return False
+    entry = action_log_last_nonce_entry(step_row.get('action_log'))
+    if not isinstance(entry, dict):
+        return False
+    if str(entry.get('type') or '').strip() != 'consent_rq':
+        return False
+    st = entry.get('status')
+    return st == 3 or str(st).strip() == '3'
+
+
+def user_message_looks_like_tool_consent_reply(user_message: Optional[str]) -> bool:
+    """
+    Short replies that should resume a pending tool consent, not ``modify_intent``.
+
+    The plan-modify classifier can misfire on ``ok`` / ``yes``; those must still infer ``c_id``.
+    """
+    if not user_message or not str(user_message).strip():
+        return False
+    m = str(user_message).strip().lower()
+    if len(m) > 160:
+        return False
+    if re.search(
+        r'\b(change|changing|modify|modifying|instead|different|airport|flight|hotel|'
+        r'nights?|add |remove |from [a-z]{3}\b|to [a-z]{3}\b)\b',
+        m,
+    ):
+        return False
+    if _heuristic_plan_modify_substrings(m):
+        return False
+    compact = re.sub(r'[\s,.!\'"]+', ' ', m).strip()
+    affirm = (
+        'yes',
+        'y',
+        'ok',
+        'okay',
+        'sure',
+        'please do',
+        'go ahead',
+        'proceed',
+        'confirm',
+        'confirmed',
+        'approved',
+        'approve',
+        'i approve',
+        'sounds good',
+        'looks good',
+        'that works',
+        'do it',
+        'run it',
+        'fine',
+        'absolutely',
+        'definitely',
+        'yes please',
+        'ok please',
+        'please go ahead',
+        'yes thanks',
+        'ok thanks',
+    )
+    deny = (
+        'no',
+        'n',
+        'cancel',
+        'stop',
+        "don't",
+        'dont',
+        'do not',
+        'abort',
+        'never mind',
+        'nevermind',
+        'no thanks',
+    )
+    if compact in affirm or compact in deny:
+        return True
+    if compact.startswith('yes ') and len(compact) < 90 and 'change' not in compact:
+        return True
+    return False
+
+
+def classify_local_reply_against_pending_execution(
+    workspace: Optional[Dict[str, Any]],
+    user_message: Optional[str],
+) -> Tuple[str, str]:
+    """
+    Local-first tri-state probe used by outer layers before plan-modify routing.
+
+    Returns:
+      - ``("match", reason)``: message likely responds to current specialist gate.
+      - ``("ambiguous", reason)``: local response is plausible but not decisive.
+      - ``("no_match", reason)``: not a local execution reply.
+    """
+    if not workspace or not isinstance(workspace, dict):
+        return 'no_match', 'No workspace available for local execution probe.'
+
+    found = find_most_advanced_execution_followup_hold(workspace)
+    if not found:
+        return 'no_match', 'No pending execution follow-up gate found.'
+
+    _, _, step_row = found
+    if not isinstance(step_row, dict):
+        return 'no_match', 'Pending gate row is unavailable.'
+
+    msg = str(user_message or '').strip()
+    if not msg:
+        return 'ambiguous', 'Pending gate exists but user message is empty.'
+    m = msg.lower()
+
+    if _heuristic_plan_modify_substrings(m):
+        return 'no_match', 'Message has explicit plan-edit phrasing.'
+
+    if _step_row_awaits_tool_consent(step_row):
+        if user_message_looks_like_tool_consent_reply(msg):
+            return 'match', 'Message matches pending consent yes/no reply.'
+        if len(re.sub(r'[\s,.!\'"]+', ' ', m).strip().split()) <= 3:
+            return 'ambiguous', 'Short reply while consent gate is pending.'
+        return 'no_match', 'Consent gate pending but reply does not look like consent.'
+
+    if _plan_step_expects_execution_user_followup(step_row):
+        if re.search(r'\b(option|pick|choose|select)\b', m):
+            return 'match', 'Selection verb detected for pending execution gate.'
+        if re.search(r'\b(first|second|third|fourth|fifth|last)\b', m):
+            return 'match', 'Ordinal selection detected for pending execution gate.'
+        if re.search(r'\b(cheapest|earliest|latest|best)\b', m):
+            return 'match', 'Comparative selection detected for pending execution gate.'
+        if re.search(r'\b(this one|that one|book it|take it)\b', m):
+            return 'match', 'Direct selection wording detected.'
+        if re.search(r'\b#?\d+\b', m):
+            return 'match', 'Numeric option reference detected.'
+        if m in {'yes', 'ok', 'okay', 'sure'}:
+            return 'ambiguous', 'Ack reply while selection gate is pending.'
+        if len(m.split()) <= 3:
+            return 'ambiguous', 'Short reply while selection gate is pending.'
+        return 'no_match', 'Pending execution gate exists but message did not bind locally.'
+
+    return 'no_match', 'Pending row does not expose a local follow-up gate.'
 
 
 def user_message_suggests_plan_continue(user_message: Optional[str]) -> bool:
@@ -496,6 +791,122 @@ def find_suspended_plan_step(
     return plan_id, sid, step
 
 
+def _nonce_entry_indicates_execution_user_followup(entry: Any) -> bool:
+    """
+    Latest nonce-bearing action-log row implies the user should reply so execution can resume
+    (consent/decision/tool completion handoff—not a saved-plan rewrite).
+    """
+    if not isinstance(entry, dict) or entry.get('nonce') is None:
+        return False
+    t = str(entry.get('type') or '').strip().lower()
+    if t in ('consent_rq', 'decision_rq', 'tool_ok'):
+        return True
+    if entry.get('yield_for_user') is True:
+        return True
+    tool = entry.get('tool')
+    return bool(tool and str(tool).strip() not in ('', '*'))
+
+
+def _plan_step_expects_execution_user_followup(step_row: Dict[str, Any]) -> bool:
+    """True when this step row likely awaits user follow-up for execution recovery/continuation."""
+    if not isinstance(step_row, dict):
+        return False
+    if str(step_row.get('status') or '').strip().lower() not in (
+        'awaiting',
+        'running',
+        'failed',
+    ):
+        return False
+    entry = action_log_last_nonce_entry(step_row.get('action_log'))
+    return _nonce_entry_indicates_execution_user_followup(entry)
+
+
+def _execution_step_preempts_plan_modify(
+    workspace: Dict[str, Any],
+    user_message: Optional[str],
+) -> bool:
+    """
+    True when any plan step is ``awaiting``/``running`` with a nonce handoff expecting the user
+    to continue the **current tool/workflow** response—saved-plan rewrite routing must not run unless
+    the message explicitly matches ``_heuristic_plan_modify_substrings``.
+
+    We scan **all** qualifying steps instead of relying on :func:`find_suspended_plan_step` alone,
+    because multiple steps may still be marked ``awaiting``; picking only the smallest ``step_id``
+    can hide the flight/hotel-picker step whose action_log carries the resume nonce.
+    """
+    m = str(user_message or '').strip().lower()
+    if _heuristic_plan_modify_substrings(m):
+        return False
+    plans = workspace.get('plan') or {}
+    sm = workspace.get('state_machine') or {}
+    for plan_id in plans.keys():
+        plan_state = sm.get(plan_id)
+        if not isinstance(plan_state, dict):
+            continue
+        for row in plan_state.get('steps') or []:
+            if isinstance(row, dict) and _plan_step_expects_execution_user_followup(row):
+                return True
+    return False
+
+
+def _advancement_key_for_execution_followup_hold(
+    workspace: Dict[str, Any],
+    *,
+    plan_id: str,
+    step_id_raw: Any,
+) -> Tuple[int, Tuple[str, int], str]:
+    """
+    Larger means a “later” resume anchor when multiple steps qualify for follow-up wording.
+
+    Prefer larger numeric ``step_id`` when possible; break ties via plan recency.
+    """
+    sid = str(step_id_raw if step_id_raw is not None else '').strip()
+    try:
+        n = int(sid)
+    except ValueError:
+        n = -1
+    rec = _plan_recency_tuple(workspace, plan_id)
+    return (n, rec, sid)
+
+
+def find_most_advanced_execution_followup_hold(
+    workspace: Dict[str, Any],
+) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    """
+    Among steps awaiting execution follow-up (nonce-bearing handoffs), prefer the furthest progressed.
+
+    Mirrors :func:`_execution_step_preempts_plan_modify` intent so ``infer_continuity_id`` can build
+    a ``c_id`` that matches picker UX (e.g. hotel/flight rows) rather than an older stalled step id.
+    """
+    plans = workspace.get('plan') or {}
+    sm = workspace.get('state_machine') or {}
+    picked: Optional[Tuple[str, str, Dict[str, Any]]] = None
+    best_k: Optional[Tuple[int, Tuple[str, int], str]] = None
+
+    for plan_id in plans.keys():
+        plan_state = sm.get(plan_id)
+        if not isinstance(plan_state, dict):
+            continue
+        for row in plan_state.get('steps') or []:
+            if not isinstance(row, dict):
+                continue
+            if not _plan_step_expects_execution_user_followup(row):
+                continue
+            rk = _advancement_key_for_execution_followup_hold(
+                workspace,
+                plan_id=str(plan_id),
+                step_id_raw=row.get('step_id'),
+            )
+            if best_k is None or rk > best_k:
+                best_k = rk
+                picked = (
+                    str(plan_id),
+                    str(row.get('step_id') or '').strip(),
+                    row,
+                )
+    return picked
+
+
 def find_pending_plan_step(
     workspace: Dict[str, Any],
 ) -> Optional[Tuple[str, str, Dict[str, Any]]]:
@@ -547,10 +958,12 @@ def find_resume_target_step(
     user_message: Optional[str] = None,
 ) -> Optional[Tuple[str, str, Dict[str, Any]]]:
     """
-    Prefer a suspended step (awaiting / failed / running); otherwise the first
-    dependency-ready ``pending`` step when the user message indicates they want to
-    continue the plan (see ``user_message_suggests_plan_continue``).
+    Prefer the most progressed execution follow-up anchor when several steps qualify, then fall
+    back to generic suspension discovery, otherwise the dependency-ready ``pending`` step pattern.
     """
+    follow = find_most_advanced_execution_followup_hold(workspace)
+    if follow:
+        return follow
     suspended = find_suspended_plan_step(workspace)
     if suspended:
         return suspended
@@ -613,6 +1026,11 @@ def infer_continuity_id(
     if nonce is None:
         return f'irn:c_id:{plan_id}:{plan_step}:'
 
+    print(
+        "infer_continuity_id(): inferred resume nonce "
+        f"plan_id={plan_id}, plan_step={plan_step}, tool={tool}, status={tool_step}, nonce={nonce}"
+    )
+
     return f'irn:c_id:{plan_id}:{plan_step}:{tool}:{tool_step}:{nonce}'
 
 
@@ -657,6 +1075,7 @@ def continuity_router(
                 'output': body,
             }
 
+        print(f'continuity_router(): incoming c_id={c_id!r}')
         parts = c_id.split(':')
 
         if parts[0] != 'irn' or parts[1] != 'c_id':
@@ -765,7 +1184,55 @@ def continuity_router(
                 },
             }
 
+        step_state_row = None
+        for step in plan_state.get('steps') or []:
+            if str(step.get('step_id')) == plan_step:
+                step_state_row = step
+                break
+        resume_entry = (
+            action_log_last_nonce_entry(
+                step_state_row.get('action_log') if isinstance(step_state_row, dict) else None
+            )
+            if isinstance(step_state_row, dict)
+            else None
+        )
+        if isinstance(resume_entry, dict):
+            print(
+                'continuity_router(): step action_log resume candidate '
+                f"plan_id={plan_id}, plan_step={plan_step}, tool={resume_entry.get('tool')}, "
+                f"status={resume_entry.get('status')}, nonce={resume_entry.get('nonce')}"
+            )
+        else:
+            print(
+                'continuity_router(): no step action_log resume candidate '
+                f"plan_id={plan_id}, plan_step={plan_step}"
+            )
+
         if not parts[4]:
+            # If caller omitted the action/tool tail, prefer resuming the last pending
+            # consent/tool handshake for this step instead of restarting from initiate_action.
+            if (
+                isinstance(resume_entry, dict)
+                and resume_entry.get('tool')
+                and resume_entry.get('status') not in (None, '')
+                and resume_entry.get('nonce') is not None
+            ):
+                action_step = str(resume_entry.get('tool'))
+                tool_step = resume_entry.get('status')
+                pr = f'Resuming tool from step action_log... ({c_id})'
+                agu.print_chat(pr, 'transient')
+                return {
+                    'success': True,
+                    'input': c_id,
+                    'output': {
+                        'next_action': 'resume_tool',
+                        'plan_id': plan_id,
+                        'plan_step': plan_step,
+                        'action_step': action_step,
+                        'tool_step': tool_step,
+                        'message': pr,
+                    },
+                }
             pr = f'Starting the new action execution... ({c_id})'
             agu.print_chat(pr, 'transient')
             return {
@@ -781,8 +1248,49 @@ def continuity_router(
             }
 
         action_step = parts[4]
+        if (
+            isinstance(resume_entry, dict)
+            and resume_entry.get('tool')
+            and resume_entry.get('status') not in (None, '')
+            and resume_entry.get('nonce') is not None
+            and str(action_step) in ('0', '')
+        ):
+            pr = f'Resuming pending consent/tool from step action_log... ({c_id})'
+            agu.print_chat(pr, 'transient')
+            return {
+                'success': True,
+                'input': c_id,
+                'output': {
+                    'next_action': 'resume_tool',
+                    'plan_id': plan_id,
+                    'plan_step': plan_step,
+                    'action_step': str(resume_entry.get('tool')),
+                    'tool_step': resume_entry.get('status'),
+                    'message': pr,
+                },
+            }
 
         if not parts[5]:
+            if (
+                isinstance(resume_entry, dict)
+                and str(resume_entry.get('tool') or '') == str(action_step)
+                and resume_entry.get('status') not in (None, '')
+                and resume_entry.get('nonce') is not None
+            ):
+                pr = f'Resuming tool from step action_log... ({c_id})'
+                agu.print_chat(pr, 'transient')
+                return {
+                    'success': True,
+                    'input': c_id,
+                    'output': {
+                        'next_action': 'resume_tool',
+                        'plan_id': plan_id,
+                        'plan_step': plan_step,
+                        'action_step': action_step,
+                        'tool_step': resume_entry.get('status'),
+                        'message': pr,
+                    },
+                }
             pr = f'Starting tool... ({c_id})'
             agu.print_chat(pr, 'transient')
             return {
@@ -799,6 +1307,27 @@ def continuity_router(
             }
 
         tool_step = parts[5]
+        if (
+            isinstance(resume_entry, dict)
+            and str(resume_entry.get('tool') or '') == str(action_step)
+            and resume_entry.get('status') not in (None, '')
+            and resume_entry.get('nonce') is not None
+            and str(tool_step) in ('0', '')
+        ):
+            pr = f'Resuming pending consent/tool from step action_log... ({c_id})'
+            agu.print_chat(pr, 'transient')
+            return {
+                'success': True,
+                'input': c_id,
+                'output': {
+                    'next_action': 'resume_tool',
+                    'plan_id': plan_id,
+                    'plan_step': plan_step,
+                    'action_step': str(resume_entry.get('tool')),
+                    'tool_step': resume_entry.get('status'),
+                    'message': pr,
+                },
+            }
         print(f'Original tool_step: {tool_step}')
         if len(parts) > 6:
             print(f'Nonce: {parts[6]}', type(parts[6]))
@@ -807,12 +1336,6 @@ def continuity_router(
             print('No nonce, making tool_step = 0')
             tool_step = 0
         else:
-            step_state_row = None
-            for step in plan_state.get('steps') or []:
-                if str(step.get('step_id')) == plan_step:
-                    step_state_row = step
-                    break
-
             if step_state_row is None:
                 print(
                     f'Step with step_id {plan_step} not found in plan_state, resetting tool_step = 0'
@@ -1064,7 +1587,15 @@ def act(
         params['_init'] = handler_init
 
         if extra and isinstance(extra, dict):
-            params.update(extra)
+            merge_extra = dict(extra)
+            if tool_name == 'commit_plan':
+                # ``commit_plan`` must use the tool JSON (draft) or its own cache lookup — not
+                # ReAct ``extra``, which carries the *already committed* workspace plan/intent and
+                # would overwrite the new plan the model (or forced tool) just supplied.
+                merge_extra.pop('plan', None)
+                merge_extra.pop('intent', None)
+                merge_extra.pop('state_machine', None)
+            params.update(merge_extra)
 
         print(f'Calling {handler_route} ')
 

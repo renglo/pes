@@ -1358,7 +1358,8 @@ PACKAGE_PROMPT_KEYS = (
     "compose_plan",
     "modify_intent_delta",
     "compose_plan_light",
-    "modify_plan",
+    "modify_intent",
+    "intent_revision_rules",
 )
 
 
