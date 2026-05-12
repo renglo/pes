@@ -901,7 +901,11 @@ def find_most_advanced_execution_followup_hold(
                 best_k = rk
                 picked = (
                     str(plan_id),
-                    str(row.get('step_id') or '').strip(),
+                    str(
+                        row.get('step_id')
+                        if row.get('step_id') is not None
+                        else ''
+                    ).strip(),
                     row,
                 )
     return picked
