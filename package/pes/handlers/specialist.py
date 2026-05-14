@@ -11,6 +11,7 @@ from decimal import Decimal
 import json
 import random
 import time
+import re
 
 class UniversalEncoder(json.JSONEncoder):
     """JSON encoder that handles Decimal, datetime, date, and other common types."""
@@ -197,6 +198,94 @@ def verification_failure_guidance_for_model(handler_output: Any) -> str:
 
 # Max verify failures (after successful tool runs) before exiting the ReAct loop with status awaiting.
 VERIFICATION_FAILURE_LIMIT = 3
+
+
+def _message_explicitly_requests_plan_rewrite(user_message: Optional[str]) -> bool:
+    """Conservative guard: True when wording clearly asks to rewrite the active plan."""
+    m = str(user_message or '').strip().lower()
+    if not m:
+        return False
+    phrase_hints = (
+        'change the plan',
+        'modify the plan',
+        'update the plan',
+        'revise the plan',
+        'rewrite the plan',
+        'replace the plan',
+        'entire plan',
+        'whole plan',
+        'move the plan',
+        'shift the plan',
+        'reschedule the plan',
+        'change the timeline',
+        'change the start date',
+        'move the start date',
+    )
+    if any(h in m for h in phrase_hints):
+        return True
+    if re.search(
+        r'\b(week|weeks|month|months|day|days)\s+(later|earlier)\b',
+        m,
+    ):
+        return True
+    return False
+
+
+def _message_is_plain_tool_consent_reply(user_message: Optional[str]) -> bool:
+    """
+    True only for short yes/no-style confirmations that should resume the exact pending tool call.
+    Rejects wording that changes constraints/dates/scope.
+    """
+    m = str(user_message or '').strip().lower()
+    if not m or len(m) > 180:
+        return False
+    compact = re.sub(r'[\s,.!\'"]+', ' ', m).strip()
+    allow = {
+        'yes',
+        'y',
+        'ok',
+        'okay',
+        'sure',
+        'go ahead',
+        'proceed',
+        'please do',
+        'confirm',
+        'confirmed',
+        'approve',
+        'approved',
+        'sounds good',
+        'looks good',
+        'that works',
+        'run it',
+        'do it',
+        'no',
+        'n',
+        'cancel',
+        'stop',
+        "don't",
+        'dont',
+        'do not',
+        'abort',
+        'never mind',
+        'nevermind',
+    }
+    # Accept short acknowledgement first; this avoids false negatives when extra
+    # context is attached to the payload text upstream.
+    if compact in allow:
+        return True
+    tokens = compact.split()
+    if tokens and tokens[0] in {'yes', 'y', 'ok', 'okay', 'sure', 'no', 'n'} and len(tokens) <= 3:
+        return True
+    if _message_explicitly_requests_plan_rewrite(m):
+        return False
+    if re.search(
+        r'\b(change|modify|different|instead|reschedul|move|shift|update|date|timeline)\b',
+        m,
+    ):
+        return False
+    return compact in allow or (
+        compact.startswith('yes ') and len(compact.split()) <= 4 and 'change' not in compact
+    )
 
 
 def _resolve_action_hook_route(
@@ -851,7 +940,37 @@ class Specialist:
                 if validated_result.get('tool_calls') and validated_result.get('role') == 'assistant':
                     # This is the LLM asking for a tool to be executed.
                     selected_tool = validated_result['tool_calls'][0]['function']['name']
-                    if (continuity['tool_step'] == '3' or continuity['tool_step'] == '4' ) and continuity['action_step'] == selected_tool :
+                    pending_consent = (
+                        str(continuity.get('tool_step') or '').strip() == '3'
+                        and str(continuity.get('action_step') or '').strip() == str(selected_tool)
+                    )
+                    if pending_consent and not _message_is_plain_tool_consent_reply(
+                        self._get_context().message
+                    ):
+                        msg = (
+                            "I paused this execution step because your last message looks like a "
+                            "change to the current trip plan, not a direct yes/no confirmation for "
+                            f"the pending `{selected_tool}` call. "
+                            "If you want to revise the plan, say that explicitly and I will route to "
+                            "plan modification; if you want to run the existing step as-is, reply with "
+                            "a clear yes/no only."
+                        )
+                        nonce = random.randint(100000, 999999)
+                        c_id = f'{c_id_pre}:*:1:{nonce}'
+                        blocked_reply = {'role': 'assistant', 'content': msg}
+                        self.AGU.save_chat(blocked_reply, next=c_id)
+                        log_entry = {
+                            "plan_id": continuity["plan_id"],
+                            "plan_step": continuity["plan_step"],
+                            "tool": selected_tool,
+                            "status": "3",
+                            "nonce": nonce,
+                            "message": msg,
+                            "type": "consent_blocked_plan_change",
+                        }
+                        self.AGU.mutate_workspace({"action_log": log_entry})
+                        validated_result = blocked_reply
+                    elif (continuity['tool_step'] == '3' or continuity['tool_step'] == '4' ) and continuity['action_step'] == selected_tool :
                         print(f'Interpret() >> Run this tool:{validated_result}')
                         # The last message was a response to "3 = WAITING HUMAN".
                         # The continuity response matches with the selected_tool. Execute tool

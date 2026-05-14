@@ -339,6 +339,14 @@ def _heuristic_plan_modify_substrings(m: str) -> bool:
         'expand the scope',
         'change requirements for the plan',
         'new requirements for the plan',
+        'move the entire plan',
+        'move the whole plan',
+        'shift the entire plan',
+        'shift the whole plan',
+        'start the entire plan',
+        'start the whole plan',
+        'entire plan',
+        'whole plan',
     )
     if any(h in m for h in hints):
         return True
@@ -352,6 +360,21 @@ def _heuristic_plan_modify_substrings(m: str) -> bool:
         'postpone the plan',
         'defer the plan',
         'reschedule the plan',
+        'move the plan',
+        'shift the plan',
+        'push the plan',
+        'pull the plan',
+        'move the start date',
+        'change the start date',
+        'start date',
+        'week later',
+        'weeks later',
+        'week earlier',
+        'weeks earlier',
+        'month later',
+        'months later',
+        'month earlier',
+        'months earlier',
     )
     return any(h in m for h in timeline)
 
@@ -368,10 +391,114 @@ def _normalize_planner_intent(payload: Optional[Dict[str, Any]]) -> Optional[str
     return None
 
 
+def _plan_summary_for_classifier(
+    plan_doc: Optional[Dict[str, Any]],
+    plan_state: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Compact active-plan summary for intent classification.
+    Keeps payload small and domain-neutral.
+    """
+    out: Dict[str, Any] = {}
+    if isinstance(plan_doc, dict):
+        out['plan_title'] = str(plan_doc.get('title') or '').strip()[:180]
+        raw_steps = plan_doc.get('steps') or []
+        if isinstance(raw_steps, list):
+            steps: List[Dict[str, Any]] = []
+            for st in raw_steps[:6]:
+                if not isinstance(st, dict):
+                    continue
+                step_inputs = st.get('inputs')
+                steps.append(
+                    {
+                        'step_id': st.get('step_id'),
+                        'title': str(st.get('title') or '')[:120],
+                        'action': str(st.get('action') or '')[:80],
+                        'input_keys': sorted(list((step_inputs or {}).keys()))
+                        if isinstance(step_inputs, dict)
+                        else [],
+                    }
+                )
+            out['steps'] = steps
+            out['step_count'] = len(raw_steps)
+    if isinstance(plan_state, dict):
+        rows = plan_state.get('steps') or []
+        if isinstance(rows, list):
+            out['state_statuses'] = [
+                {
+                    'step_id': r.get('step_id'),
+                    'status': r.get('status'),
+                }
+                for r in rows[:10]
+                if isinstance(r, dict)
+            ]
+    return out
+
+
+def _build_plan_modify_classifier_context(
+    workspace: Optional[Dict[str, Any]],
+    payload: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Context for the LLM classifier so it can separate:
+      - confirmation of current gate
+      - local step parameter tweaks
+      - full plan rewrite intent
+    """
+    ctx: Dict[str, Any] = {}
+    planner_intent = _normalize_planner_intent(payload)
+    if planner_intent:
+        ctx['planner_intent'] = planner_intent
+    if not workspace or not isinstance(workspace, dict):
+        return ctx or None
+    bundle = active_plan_bundle(workspace)
+    if bundle:
+        pid, plan_doc, plan_state = bundle
+        ctx['active_plan_id'] = pid
+        ctx['active_plan'] = _plan_summary_for_classifier(plan_doc, plan_state)
+    pending = find_most_advanced_execution_followup_hold(workspace)
+    if pending:
+        pid, sid, step_row = pending
+        last_nonce = action_log_last_nonce_entry(
+            step_row.get('action_log') if isinstance(step_row, dict) else None
+        )
+        ctx['pending_execution_gate'] = {
+            'plan_id': pid,
+            'step_id': sid,
+            'step_title': (
+                str(step_row.get('title') or '')[:120]
+                if isinstance(step_row, dict)
+                else ''
+            ),
+            'step_status': (
+                str(step_row.get('status') or '')
+                if isinstance(step_row, dict)
+                else ''
+            ),
+            'last_handoff_type': (
+                str((last_nonce or {}).get('type') or '')
+                if isinstance(last_nonce, dict)
+                else ''
+            ),
+            'last_handoff_tool': (
+                str((last_nonce or {}).get('tool') or '')
+                if isinstance(last_nonce, dict)
+                else ''
+            ),
+            'last_handoff_message': (
+                str((last_nonce or {}).get('message') or '')[:220]
+                if isinstance(last_nonce, dict)
+                else ''
+            ),
+        }
+    return ctx or None
+
+
 def _evaluate_plan_modify_signal(
     user_message: Optional[str],
     payload: Optional[Dict[str, Any]] = None,
     *,
+    workspace: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     if _normalize_planner_intent(payload) == 'modify':
@@ -389,13 +516,15 @@ def _evaluate_plan_modify_signal(
             True,
             'Matched conservative plan-change phrases (explicit intent to edit the saved plan).',
         )
+    classifier_context = _build_plan_modify_classifier_context(workspace, payload)
     llm = classify_user_requests_plan_modify(
         str(user_message).strip(),
         config=config,
+        context=classifier_context,
     )
     if llm is True:
         return True, (
-            'Classifier reports a clear request to revise or replace the persisted plan '
+            'Contextual classifier reports a clear request to revise or replace the persisted plan '
             '(structure, steps, scope, or plan-level constraints).'
         )
     if llm is False:
@@ -412,6 +541,7 @@ def explain_plan_modify_decision(
     user_message: Optional[str],
     payload: Optional[Dict[str, Any]] = None,
     *,
+    workspace: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str]:
     """
@@ -420,13 +550,16 @@ def explain_plan_modify_decision(
     Used by callers (e.g. ``agent_quotes``) when logging why a yes/no gate was shown.
     Mirrors :func:`user_message_requests_plan_modify` logic.
     """
-    return _evaluate_plan_modify_signal(user_message, payload, config=config)
+    return _evaluate_plan_modify_signal(
+        user_message, payload, workspace=workspace, config=config
+    )
 
 
 def user_message_requests_plan_modify(
     user_message: Optional[str],
     payload: Optional[Dict[str, Any]] = None,
     *,
+    workspace: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
@@ -439,7 +572,9 @@ def user_message_requests_plan_modify(
     When heuristics miss, an optional LLM classifier may run (``plan_modify_classifier``).
     If the classifier is disabled or inconclusive, the result stays False (no reroute).
     """
-    decides, _ = _evaluate_plan_modify_signal(user_message, payload, config=config)
+    decides, _ = _evaluate_plan_modify_signal(
+        user_message, payload, workspace=workspace, config=config
+    )
     return decides
 
 
@@ -472,7 +607,7 @@ def plan_modify_resolution_if_applicable(
     if _execution_step_preempts_plan_modify(workspace, user_message):
         return None
     decides, rationale = _evaluate_plan_modify_signal(
-        user_message, payload, config=config
+        user_message, payload, workspace=workspace, config=config
     )
     if not decides:
         return None

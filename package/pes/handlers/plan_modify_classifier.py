@@ -58,6 +58,7 @@ def _parse_plan_modify_flag(text: str) -> Optional[bool]:
 def classify_user_requests_plan_modify(
     user_message: str,
     *,
+    context: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> Optional[bool]:
     """
@@ -95,9 +96,18 @@ def classify_user_requests_plan_modify(
         'Set FALSE by default when uncertain. '
         'FALSE includes: short confirmations or denials, choosing how to proceed within the current '
         'step, operational details that do not imply rewriting the plan, status questions, '
-        'clarifications, greetings, or vague language that could go either way.'
+        'clarifications, greetings, or vague language that could go either way. '
+        'If context is provided, use it: if the user is clearly responding to a pending confirmation/'
+        'selection gate for the current step, prefer false unless the message explicitly asks to '
+        'rewrite plan-level constraints.'
     )
     user_block = f'User message:\n"""{msg[:4000]}"""'
+    if isinstance(context, dict) and context:
+        try:
+            cjson = json.dumps(context, ensure_ascii=True, sort_keys=True, default=str)
+        except Exception:
+            cjson = str(context)
+        user_block += f'\n\nContext (JSON):\n{cjson[:6000]}'
 
     try:
         client = OpenAI(api_key=str(cfg.get('OPENAI_API_KEY') or '').strip())
