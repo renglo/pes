@@ -23,6 +23,15 @@ from pes.handlers.plan_modify_classifier import classify_user_requests_plan_modi
 
 
 ContinuityMode = Literal['resume', 'modify_intent', 'none']
+TurnIntentKind = Literal[
+    'continue_execution',
+    'tool_consent_reply',
+    'plan_revision_request',
+    'draft_approval',
+    'draft_revision',
+    'unknown',
+]
+TurnIntentPhase = Literal['auto', 'tool_consent', 'draft_approval']
 
 
 @dataclass
@@ -44,6 +53,148 @@ class NoNextContinuityResolution:
     plan_state: Optional[Dict[str, Any]] = None
     # Set when mode is ``modify_intent`` — why we treated the user message as a plan edit.
     plan_modify_signal_explanation: Optional[str] = None
+
+
+@dataclass
+class UserTurnIntent:
+    """
+    Canonical interpretation of a free-text user turn for routing.
+    """
+
+    kind: TurnIntentKind
+    reason: str
+    local_probe: str = 'no_match'
+    binary_confirmation: str = 'unknown'
+
+
+def classify_user_turn_intent(
+    *,
+    workspace: Optional[Dict[str, Any]],
+    user_message: Optional[str],
+    payload: Optional[Dict[str, Any]] = None,
+    config: Optional[Dict[str, Any]] = None,
+    phase: TurnIntentPhase = 'auto',
+) -> UserTurnIntent:
+    """
+    Local-first, global-second turn classification used by both agent and specialist layers.
+    """
+    msg = str(user_message or '').strip()
+    if not msg:
+        return UserTurnIntent(kind='unknown', reason='Empty user message.')
+
+    binary = classify_binary_confirmation(msg)
+    local_probe, local_reason = classify_local_reply_against_pending_execution(workspace, msg)
+
+    if local_probe == 'match':
+        if binary in ('yes', 'no'):
+            return UserTurnIntent(
+                kind='tool_consent_reply',
+                reason=f'Local execution gate match. {local_reason}',
+                local_probe=local_probe,
+                binary_confirmation=binary,
+            )
+        return UserTurnIntent(
+            kind='continue_execution',
+            reason=f'Local execution gate match. {local_reason}',
+            local_probe=local_probe,
+            binary_confirmation=binary,
+        )
+
+    if phase == 'tool_consent':
+        if local_probe == 'ambiguous':
+            if binary in ('yes', 'no'):
+                return UserTurnIntent(
+                    kind='tool_consent_reply',
+                    reason=f'Ambiguous local gate with binary confirmation. {local_reason}',
+                    local_probe=local_probe,
+                    binary_confirmation=binary,
+                )
+            return UserTurnIntent(
+                kind='continue_execution',
+                reason=f'Ambiguous local gate; avoid global rewrite routing. {local_reason}',
+                local_probe=local_probe,
+                binary_confirmation=binary,
+            )
+        decides, why = _evaluate_plan_modify_signal(
+            msg, payload, workspace=workspace, config=config
+        )
+        if decides:
+            return UserTurnIntent(
+                kind='plan_revision_request',
+                reason=f'No local consent match; explicit/global plan revision signal. {why}',
+                local_probe=local_probe,
+                binary_confirmation=binary,
+            )
+        return UserTurnIntent(
+            kind='unknown',
+            reason=f'No local consent match. {local_reason}',
+            local_probe=local_probe,
+            binary_confirmation=binary,
+        )
+
+    if phase == 'draft_approval':
+        if binary == 'yes':
+            return UserTurnIntent(
+                kind='draft_approval',
+                reason='Short binary approval while draft is pending.',
+                local_probe=local_probe,
+                binary_confirmation=binary,
+            )
+        if binary == 'no':
+            return UserTurnIntent(
+                kind='draft_revision',
+                reason='Short binary rejection while draft is pending.',
+                local_probe=local_probe,
+                binary_confirmation=binary,
+            )
+        decides, why = _evaluate_plan_modify_signal(
+            msg, payload, workspace=workspace, config=config
+        )
+        if decides:
+            return UserTurnIntent(
+                kind='draft_revision',
+                reason=f'Draft-revision signal detected. {why}',
+                local_probe=local_probe,
+                binary_confirmation=binary,
+            )
+        return UserTurnIntent(
+            kind='unknown',
+            reason='No clear draft approval/revision signal.',
+            local_probe=local_probe,
+            binary_confirmation=binary,
+        )
+
+    if local_probe == 'ambiguous':
+        return UserTurnIntent(
+            kind='continue_execution',
+            reason=f'Local context is plausible; prefer continuity. {local_reason}',
+            local_probe=local_probe,
+            binary_confirmation=binary,
+        )
+
+    decides, why = _evaluate_plan_modify_signal(
+        msg, payload, workspace=workspace, config=config
+    )
+    if decides:
+        return UserTurnIntent(
+            kind='plan_revision_request',
+            reason=why,
+            local_probe=local_probe,
+            binary_confirmation=binary,
+        )
+    if binary in ('yes', 'no'):
+        return UserTurnIntent(
+            kind='tool_consent_reply',
+            reason='Binary confirmation without active local gate; keep conservative routing.',
+            local_probe=local_probe,
+            binary_confirmation=binary,
+        )
+    return UserTurnIntent(
+        kind='unknown',
+        reason='No clear local or global signal.',
+        local_probe=local_probe,
+        binary_confirmation=binary,
+    )
 
 
 def _plan_state_ready(plan_state: Any) -> bool:
@@ -716,27 +867,23 @@ def _step_row_awaits_tool_consent(step_row: Dict[str, Any]) -> bool:
     return st == 3 or str(st).strip() == '3'
 
 
-def user_message_looks_like_tool_consent_reply(user_message: Optional[str]) -> bool:
+def classify_binary_confirmation(user_message: Optional[str]) -> str:
     """
-    Short replies that should resume a pending tool consent, not ``modify_intent``.
+    Parse short conversational confirmations into ``yes`` / ``no`` / ``unknown``.
 
-    The plan-modify classifier can misfire on ``ok`` / ``yes``; those must still infer ``c_id``.
+    This intentionally uses bounded phrase sets and token-aware checks to avoid
+    substring false positives (e.g. ``not`` inside unrelated words).
     """
     if not user_message or not str(user_message).strip():
-        return False
+        return 'unknown'
     m = str(user_message).strip().lower()
-    if len(m) > 160:
-        return False
-    if re.search(
-        r'\b(change|changing|modify|modifying|instead|different|airport|flight|hotel|'
-        r'nights?|add |remove |from [a-z]{3}\b|to [a-z]{3}\b)\b',
-        m,
-    ):
-        return False
-    if _heuristic_plan_modify_substrings(m):
-        return False
+    if len(m) > 180:
+        return 'unknown'
     compact = re.sub(r'[\s,.!\'"]+', ' ', m).strip()
-    affirm = (
+    if not compact:
+        return 'unknown'
+
+    yes_phrases = {
         'yes',
         'y',
         'ok',
@@ -755,16 +902,13 @@ def user_message_looks_like_tool_consent_reply(user_message: Optional[str]) -> b
         'that works',
         'do it',
         'run it',
-        'fine',
-        'absolutely',
-        'definitely',
         'yes please',
         'ok please',
         'please go ahead',
         'yes thanks',
         'ok thanks',
-    )
-    deny = (
+    }
+    no_phrases = {
         'no',
         'n',
         'cancel',
@@ -776,12 +920,35 @@ def user_message_looks_like_tool_consent_reply(user_message: Optional[str]) -> b
         'never mind',
         'nevermind',
         'no thanks',
-    )
-    if compact in affirm or compact in deny:
-        return True
-    if compact.startswith('yes ') and len(compact) < 90 and 'change' not in compact:
-        return True
-    return False
+    }
+    if compact in yes_phrases:
+        return 'yes'
+    if compact in no_phrases:
+        return 'no'
+
+    tokens = compact.split()
+    if not tokens:
+        return 'unknown'
+    first = tokens[0]
+    if first in {'yes', 'y', 'ok', 'okay', 'sure'} and len(tokens) <= 4:
+        return 'yes'
+    if first in {'no', 'n'} and len(tokens) <= 4:
+        return 'no'
+    return 'unknown'
+
+
+def user_message_looks_like_tool_consent_reply(user_message: Optional[str]) -> bool:
+    """
+    Short replies that should resume a pending tool consent, not ``modify_intent``.
+
+    The plan-modify classifier can misfire on ``ok`` / ``yes``; those must still infer ``c_id``.
+    """
+    if not user_message or not str(user_message).strip():
+        return False
+    m = str(user_message).strip().lower()
+    if _heuristic_plan_modify_substrings(m):
+        return False
+    return classify_binary_confirmation(user_message) in ('yes', 'no')
 
 
 def classify_local_reply_against_pending_execution(
@@ -818,7 +985,7 @@ def classify_local_reply_against_pending_execution(
     if _step_row_awaits_tool_consent(step_row):
         if user_message_looks_like_tool_consent_reply(msg):
             return 'match', 'Message matches pending consent yes/no reply.'
-        if len(re.sub(r'[\s,.!\'"]+', ' ', m).strip().split()) <= 3:
+        if len(re.sub(r'[\s,.!\'"]+', ' ', m).strip().split()) <= 4:
             return 'ambiguous', 'Short reply while consent gate is pending.'
         return 'no_match', 'Consent gate pending but reply does not look like consent.'
 
@@ -938,8 +1105,7 @@ def _nonce_entry_indicates_execution_user_followup(entry: Any) -> bool:
         return True
     if entry.get('yield_for_user') is True:
         return True
-    tool = entry.get('tool')
-    return bool(tool and str(tool).strip() not in ('', '*'))
+    return False
 
 
 def _plan_step_expects_execution_user_followup(step_row: Dict[str, Any]) -> bool:
@@ -1151,6 +1317,8 @@ def infer_continuity_id(
 
     entry = action_log_last_nonce_entry(step.get('action_log'))
     if not entry:
+        return f'irn:c_id:{plan_id}:{plan_step}:'
+    if not _nonce_entry_indicates_execution_user_followup(entry):
         return f'irn:c_id:{plan_id}:{plan_step}:'
 
     tool = entry.get('tool')
