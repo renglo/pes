@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pes-mod"
 version = "1.0.0"
 description = "PES custom handlers, blueprints, and utilities"
+license = { text = "MIT" }
 authors = [
     {name = "PES Team"}
 ]

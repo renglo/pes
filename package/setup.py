@@ -10,6 +10,7 @@ setup(
     version="1.0.0",
     description="PES custom handlers, blueprints, and utilities",
     author="PES Team",
+    license="MIT",
     packages=find_packages(),
     python_requires=">=3.12",
     install_requires=[

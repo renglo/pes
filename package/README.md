@@ -112,7 +112,7 @@ This module follows the refactored architecture:
 
 ## License
 
-See main repository LICENSE files.
+This project is licensed under the MIT License. See [LICENSE.txt](../LICENSE.txt) for details.
 
 
 
