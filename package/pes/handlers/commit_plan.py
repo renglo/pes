@@ -1,6 +1,6 @@
 # get_available_documents.py
 from renglo.data.data_controller import DataController
-from renglo.docs.docs_controller import DocsController
+from renglo.files.files_controller import FilesController
 from renglo.auth.auth_controller import AuthController
 from renglo.chat.chat_controller import ChatController
 from renglo.blueprint.blueprint_controller import BlueprintController
@@ -75,7 +75,7 @@ class CommitPlan:
         # Initialize controllers with config
         self.DAC = DataController(config=self.config)
         self.AUC = AuthController(config=self.config)
-        self.DCC = DocsController(config=self.config)
+        self.FCC = FilesController(config=self.config)
         self.BPC = BlueprintController(config=self.config)
         self.CHC = ChatController(config=self.config)
         
