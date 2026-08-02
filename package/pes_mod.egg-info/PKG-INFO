@@ -3,6 +3,7 @@ Name: pes-mod
 Version: 1.0.0
 Summary: PES custom handlers, blueprints, and utilities
 Author: PES Team
+License: MIT
 Requires-Python: >=3.12
 Requires-Dist: requests>=2.32.0
 Requires-Dist: google-search-results>=2.4.2
