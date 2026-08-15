@@ -1,11 +1,10 @@
+from renglo.blueprint.extension_blueprints import ensure_extension_blueprints
 from renglo.common import load_config
 
 
 class InitializeExtension:
     """
     Per-org setup when a team is assigned to PES.
-
-    Add org-scoped steps here as needed.
     """
 
     def __init__(self):
@@ -21,10 +20,23 @@ class InitializeExtension:
                 "message": "org is required",
                 "input": payload,
             }
+
+        results = [self.ensure_blueprints()]
+        if not results[0].get("success"):
+            return {
+                "success": False,
+                "action": "initialize_extension",
+                "message": "PES initialization failed",
+                "input": payload,
+                "output": results,
+            }
         return {
             "success": True,
             "action": "initialize_extension",
-            "message": "PES has no org initialization steps",
+            "message": "PES initialized",
             "input": payload,
-            "output": [],
+            "output": results,
         }
+
+    def ensure_blueprints(self):
+        return ensure_extension_blueprints(self.config, module_file=__file__)
