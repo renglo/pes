@@ -16,8 +16,14 @@ __all__ = []
 
 # Registry of available handlers
 # Add your handlers here as you create them
+def _get_initialize_extension():
+    from pes.handlers.initialize_extension import InitializeExtension
+
+    return InitializeExtension
+
+
 HANDLERS = {
-    # 'example_handler': get_example_handler,
+    "initialize_extension": _get_initialize_extension,
 }
 
 def get_handler(handler_name: str):
