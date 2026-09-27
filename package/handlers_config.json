@@ -1,0 +1,13 @@
+{
+  "handlers": {
+    "commit_plan": "pes.handlers.commit_plan.CommitPlan",
+    "execute_plan": "pes.handlers.execute_plan.ExecutePlan",
+    "generate_plan": "pes.handlers.generate_plan.GeneratePlan",
+    "initialize_extension": "pes.handlers.initialize_extension.InitializeExtension",
+    "modify_intent": "pes.handlers.modify_intent.ModifyIntent",
+    "pes_agent": "pes.handlers.pes_agent.PesAgent",
+    "propose_plan": "pes.handlers.propose_plan.ProposePlan",
+    "specialist": "pes.handlers.specialist.Specialist",
+    "specialist_v0": "pes.handlers.specialist_v0.Specialist"
+  }
+}
