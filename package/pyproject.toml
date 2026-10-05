@@ -29,6 +29,9 @@ packages = ["pes", "pes.handlers"]
 [tool.setuptools.package-data]
 pes = ["blueprints/*.json"]
 
+[tool.renglo]
+platform = "0.1.4"
+
 
 
 
