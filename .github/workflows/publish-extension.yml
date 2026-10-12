@@ -3,11 +3,12 @@ name: Publish extension (Python + npm)
 # For Renglo-style extension repos. One tag publishes whichever trees exist:
 #   package/pyproject.toml  →  Python wheel
 #   ui/package.json         →  npm package
-# Missing trees skip that job. Canonical copy: ops/publisher/workflows/publish-extension.yml
+# Missing trees skip that job. Copy this file to .github/workflows/publish-extension.yml
+# in each product repo. Canonical copy: renglo-ops/samples/publish-extension.yml
 #
 # Repository variables (same three for every publish workflow in this repo):
 #   AWS_PUBLISH_ROLE_ARN
-#   PUBLISHER_NAME            e.g. renglo  →  SSM /publisher/renglo/config
+#   PUBLISHER_NAME            e.g. apollo  →  SSM /publisher/apollo/config
 #   AWS_REGION
 #
 # Optional: PUBLISH_PUBLIC=true plus PYPI_API_TOKEN and NPM_TOKEN secrets
@@ -116,6 +117,27 @@ jobs:
           print(f"Staged {len(files)} blueprint(s) into {dest}")
           PY
           python -m build package
+          python3 <<'PY'
+          import zipfile
+          from pathlib import Path
+          root = Path(".")
+          names = sorted(p.name for p in (root / "blueprints").glob("*.json")) if (root / "blueprints").is_dir() else []
+          if not names:
+              raise SystemExit(0)
+          wheels = sorted((root / "package" / "dist").glob("*.whl"))
+          if not wheels:
+              raise SystemExit("No wheel built under package/dist")
+          with zipfile.ZipFile(wheels[-1]) as zf:
+              packed = {Path(name).name for name in zf.namelist() if name.endswith(".json")}
+          missing = [name for name in names if name not in packed]
+          if missing:
+              raise SystemExit(
+                  "Wheel is missing blueprint JSON. Declare "
+                  "[tool.setuptools.package-data] <import> = [\"blueprints/*.json\"] "
+                  f"in package/pyproject.toml. Missing: {', '.join(missing)}"
+              )
+          print(f"Wheel contains {len(names)} blueprint(s)")
+          PY
           twine upload --repository codeartifact package/dist/*
 
       - name: Publish to public PyPI
