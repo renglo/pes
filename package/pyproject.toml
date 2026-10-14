@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "renglo-pes"
-version = "1.0.5"
+version = "1.0.6rc1"
 description = "PES custom handlers, blueprints, and utilities"
 license = { text = "MIT" }
 authors = [
@@ -30,7 +30,7 @@ packages = ["pes", "pes.handlers"]
 pes = ["blueprints/*.json"]
 
 [tool.renglo]
-platform = "0.1.7"
+platform = "0.1.8"
 
 
 
